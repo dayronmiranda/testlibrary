@@ -64,6 +64,11 @@
       "chat_removed",
       "chat_archived",
       "media_uploaded",
+      "media_queued",
+      "media_processing",
+      "media_downloaded",
+      "media_failed",
+      "media_retry",
       "incoming_call",
       "call",
       "call_ended",
@@ -113,6 +118,15 @@
       "sticker": [".webp"],
       "voice": [".ogg", ".opus"],
       "gif": [".gif", ".webp"]
+    },
+    "queue": {
+      "enabled": true,
+      "downloadConcurrency": 3,
+      "downloadInterval": 1000,
+      "downloadIntervalCap": 2,
+      "maxRetries": 3,
+      "retryDelay": 2000,
+      "processAsync": true
     }
   },
   "errorHandling": {
@@ -181,5 +195,39 @@
     "showNotification": true,
     "intervalMs": 180000,
     "voice": true
+  },
+  "timeouts": {
+    "webhookRequest": 10000,
+    "httpAgent": 60000,
+    "qrMaxRetries": 5,
+    "authTimeout": 60000,
+    "takeoverTimeout": 5000,
+    "puppeteerTimeout": 30000,
+    "pageLoadTimeout": 60000,
+    "callTimeout": 30000,
+    "callAutoRejectDelay": 1000,
+    "liveLocationUpdateInterval": 5000,
+    "liveLocationMaxDuration": 28800000,
+    "tabTimeout": 10000,
+    "browserShutdownTimeout": 10000,
+    "restartDelay": 5000,
+    "gracefulShutdownTimeout": 30000
+  },
+  "limits": {
+    "maxCacheSize": 1000,
+    "maxFileSize": 104857600,
+    "maxWebhookQueueSize": 10000,
+    "maxEventLogSize": 1000,
+    "maxLiveLocationUpdates": 5760,
+    "maxHttpSockets": 10,
+    "maxRetryAttempts": 3
+  },
+  "intervals": {
+    "statsUpdate": 30000,
+    "healthCheck": 60000,
+    "cacheCleanup": 300000,
+    "dashboardRefresh": 30000,
+    "webhookRetryDelay": 1000,
+    "connectionRetryDelay": 2000
   }
 }

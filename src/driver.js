@@ -1,35 +1,39 @@
 const { Client, LocalAuth, NoAuth } = require('../index.js');
 const fs = require('fs').promises;
 const path = require('path');
-const fetch = require('node-fetch');
-const crypto = require('crypto');
-const https = require('https');
-const http = require('http');
+const { createLoggerFromConfig } = require('./logger');
 
+// Import specialized managers
+const MediaManager = require('./managers/MediaManager');
+const StateManager = require('./managers/StateManager');
+const WebhookManager = require('./managers/WebhookManager');
+const MediaQueue = require('./managers/MediaQueue');
+const StateAPI = require('./ipc/StateAPI');
+
+/**
+ * Enhanced WhatsApp Driver - Refactored as a Coordinator
+ * Responsibilities: Client initialization, event coordination, manager orchestration
+ */
 class EnhancedWhatsAppDriver {
     constructor(configPath = './config/default.json') {
         this.configPath = configPath;
         this.config = null;
         this.client = null;
-        this.mediaCache = new Map();
-        this.maxCacheSize = 1000; // Configurable limit
-        this.webhookQueue = [];
-        this.isProcessingWebhooks = false;
         this.logger = null;
-        this.downloadedFiles = new Set();
-        this.liveLocationTrackers = new Map();
-        this.browserTabs = new Map();
-        this.callStates = new Map();
-        this.pollStates = new Map();
-        this.activeTimeouts = new Set();
+        
+        // Specialized managers
+        this.mediaManager = null;
+        this.stateManager = null;
+        this.webhookManager = null;
+        this.mediaQueue = null;
+        this.stateAPI = null;
+        
+        // Graceful shutdown
+        this.isShuttingDown = false;
         this.abortController = new AbortController();
         
-        // HTTP connection pooling for webhooks
-        this.httpAgent = new https.Agent({
-            keepAlive: true,
-            maxSockets: 10,
-            timeout: 60000
-        });
+        // Setup signal handlers early
+        this.setupSignalHandlers();
     }
 
     async initialize() {
@@ -43,79 +47,66 @@ class EnhancedWhatsAppDriver {
             // Create necessary directories
             await this.createDirectories();
             
-            // Initialize media cache
-            await this.initializeMediaCache();
+            // Initialize specialized managers
+            await this.initializeManagers();
             
             // Initialize WhatsApp client
             await this.initializeClient();
             
-            this.log('info', 'Enhanced WhatsApp Driver initialized successfully');
+            await this.logger.info('Enhanced WhatsApp Driver initialized successfully');
         } catch (error) {
-            this.log('error', 'Failed to initialize Enhanced WhatsApp Driver:', error);
+            await this.logger.error('Failed to initialize Enhanced WhatsApp Driver:', error);
             throw error;
         }
     }
 
     async loadConfig() {
         try {
-            const configData = await fs.readFile(this.configPath, 'utf8');
-            try {
-                this.config = JSON.parse(configData);
-            } catch (parseError) {
-                throw new Error(`Invalid JSON in configuration file: ${parseError.message}`);
+            // Load default configuration
+            const configPath = path.join(__dirname, '..', 'config', 'default.json');
+            const configData = await fs.readFile(configPath, 'utf8');
+            this.config = JSON.parse(configData);
+            
+            // Load production overrides if NODE_ENV is production
+            if (process.env.NODE_ENV === 'production') {
+                try {
+                    const prodConfigPath = path.join(__dirname, '..', 'config', 'production.json');
+                    const prodConfigData = await fs.readFile(prodConfigPath, 'utf8');
+                    const prodConfig = JSON.parse(prodConfigData);
+                    this.config = this.mergeConfig(this.config, prodConfig);
+                } catch (error) {
+                    console.warn('⚠️  Production config not found, using default config');
+                }
             }
-            this.log('info', 'Configuration loaded successfully');
+            
+            console.log('✅ Configuration loaded successfully');
         } catch (error) {
-            this.log('error', 'Failed to load configuration:', error);
-            throw new Error(`Failed to load configuration from ${this.configPath}: ${error.message}`);
+            console.error('❌ Failed to load configuration:', error);
+            throw new Error(`Failed to load configuration: ${error.message}`);
         }
+    }
+
+    mergeConfig(defaultConfig, overrideConfig) {
+        const merged = { ...defaultConfig };
+        
+        for (const [key, value] of Object.entries(overrideConfig)) {
+            if (typeof value === 'object' && value !== null && !Array.isArray(value)) {
+                merged[key] = this.mergeConfig(merged[key] || {}, value);
+            } else {
+                merged[key] = value;
+            }
+        }
+        
+        return merged;
     }
 
     async initializeLogger() {
-        const logDir = this.config.errorHandling.logPath;
-        
-        this.logger = {
-            log: async (level, message, data = null) => {
-                // Filter out debug messages in production
-                if (level === 'debug' && this.config.errorHandling.logLevel !== 'debug') {
-                    return;
-                }
-
-                const timestamp = new Date().toISOString();
-                const dataStr = data ? (typeof data === 'object' ? JSON.stringify(data) : data) : null;
-                const logLine = `[${timestamp}] [${level.toUpperCase()}] ${message}${dataStr ? ` - ${dataStr}` : ''}\n`;
-
-                // Console logging
-                if (this.config.errorHandling.enableConsoleLogging) {
-                    console.log(logLine.trim());
-                }
-
-                // File logging
-                if (this.config.errorHandling.enableFileLogging) {
-                    try {
-                        const logFile = path.join(logDir, `${new Date().toISOString().split('T')[0]}.log`);
-                        await fs.appendFile(logFile, logLine);
-                    } catch (error) {
-                        console.error('Failed to write to log file:', error);
-                    }
-                }
-            }
-        };
-    }
-
-    log(level, message, data = null) {
-        if (this.logger) {
-            this.logger.log(level, message, data);
-        } else {
-            console.log(`[${level.toUpperCase()}] ${message}`, data || '');
-        }
+        this.logger = createLoggerFromConfig(this.config);
     }
 
     async createDirectories() {
         const directories = [
             this.config.session.dataPath,
-            this.config.media.downloadPath,
-            this.config.media.cachePath,
             this.config.errorHandling.logPath
         ];
 
@@ -124,54 +115,56 @@ class EnhancedWhatsAppDriver {
             directories.push(this.config.locations.locationDataPath);
         }
 
-        // Create media type directories if organizing by type
-        if (this.config.media.organizeByType) {
-            Object.keys(this.config.media.downloadTypes).forEach(type => {
-                if (this.config.media.downloadTypes[type]) {
-                    directories.push(path.join(this.config.media.downloadPath, type));
-                }
-            });
-        }
-
         for (const dir of directories) {
             try {
                 await fs.mkdir(dir, { recursive: true });
-                this.log('debug', `Directory created/verified: ${dir}`);
+                await this.logger.debug(`Directory created/verified: ${dir}`);
             } catch (error) {
-                this.log('error', `Failed to create directory ${dir}:`, error);
+                await this.logger.error(`Failed to create directory ${dir}:`, error);
                 throw error;
             }
         }
     }
 
-    async initializeMediaCache() {
-        if (!this.config.media.cacheEnabled) return;
-
+    async initializeManagers() {
         try {
-            const cacheFile = path.join(this.config.media.cachePath, 'media_cache.json');
-            const cacheData = await fs.readFile(cacheFile, 'utf8');
-            const cache = JSON.parse(cacheData);
+            // Initialize MediaManager
+            this.mediaManager = new MediaManager(this.config, this.logger);
+            await this.mediaManager.initialize();
             
-            for (const [key, value] of Object.entries(cache)) {
-                this.mediaCache.set(key, value);
+            // Initialize StateManager
+            this.stateManager = new StateManager(this.config, this.logger);
+            await this.stateManager.initialize();
+            
+            // Initialize WebhookManager
+            this.webhookManager = new WebhookManager(this.config, this.logger);
+            await this.webhookManager.initialize();
+            
+            // Initialize MediaQueue (if enabled)
+            if (this.config.media?.queue?.enabled) {
+                this.mediaQueue = new MediaQueue(
+                    this.mediaManager,
+                    this.webhookManager,
+                    this.logger,
+                    this.config
+                );
+                await this.mediaQueue.initialize();
             }
             
-            this.log('info', `Media cache loaded with ${this.mediaCache.size} entries`);
+            // Initialize StateAPI for IPC
+            this.stateAPI = new StateAPI(
+                this.stateManager,
+                this.mediaManager,
+                this.webhookManager,
+                this.logger,
+                3002 // Port for StateAPI
+            );
+            await this.stateAPI.start();
+            
+            await this.logger.info('All managers and StateAPI initialized successfully');
         } catch (error) {
-            this.log('info', 'No existing media cache found, starting fresh');
-        }
-    }
-
-    async saveMediaCache() {
-        if (!this.config.media.cacheEnabled) return;
-
-        try {
-            const cacheFile = path.join(this.config.media.cachePath, 'media_cache.json');
-            const cacheData = Object.fromEntries(this.mediaCache);
-            await fs.writeFile(cacheFile, JSON.stringify(cacheData, null, 2));
-            this.log('debug', 'Media cache saved');
-        } catch (error) {
-            this.log('error', 'Failed to save media cache:', error);
+            await this.logger.error('Failed to initialize managers:', error);
+            throw error;
         }
     }
 
@@ -254,438 +247,149 @@ class EnhancedWhatsAppDriver {
             // Set up event listeners
             this.setupEventListeners();
 
-            this.log('info', 'Enhanced WhatsApp client initialized');
+            await this.logger.info('Enhanced WhatsApp client initialized');
         } catch (error) {
-            this.log('error', 'Failed to initialize client:', error);
+            await this.logger.error('Failed to initialize client:', error);
             throw error;
         }
     }
 
     setupEventListeners() {
-        // Loading screen event
+        // Basic connection events
         this.client.on('loading_screen', async (percent, message) => {
-            this.log('info', `Loading screen: ${percent}% - ${message}`);
-            await this.sendWebhook('loading_screen', { percent, message });
+            await this.logger.info(`Loading screen: ${percent}% - ${message}`);
+            await this.webhookManager.sendWebhook('loading_screen', { percent, message });
         });
 
-        // QR Code event
         this.client.on('qr', async (qr) => {
-            this.log('info', 'QR Code received');
-            await this.sendWebhook('qr', { qr });
+            await this.logger.info('QR Code received');
+            await this.webhookManager.sendWebhook('qr', { qr });
         });
 
-        // Pairing code event
         this.client.on('code', async (code) => {
-            this.log('info', `Pairing code received: ${code}`);
-            await this.sendWebhook('code', { code });
+            await this.logger.info(`Pairing code received: ${code}`);
+            await this.webhookManager.sendWebhook('code', { code });
         });
 
-        // Authentication events
         this.client.on('authenticated', async (session) => {
-            this.log('info', 'Client authenticated');
-            await this.sendWebhook('authenticated', { session });
-            
-            // Setup browser lifecycle monitoring after authentication
+            await this.logger.info('Client authenticated');
+            await this.webhookManager.sendWebhook('authenticated', { session });
             await this.setupBrowserLifecycleMonitoring();
         });
 
         this.client.on('auth_failure', async (message) => {
-            this.log('error', 'Authentication failed:', message);
-            await this.sendWebhook('auth_failure', { message });
+            await this.logger.error('Authentication failed:', message);
+            await this.webhookManager.sendWebhook('auth_failure', { message });
         });
 
-        // Ready event
         this.client.on('ready', async () => {
-            this.log('info', 'Client is ready');
-            await this.sendWebhook('ready', {});
-            
-            // Setup enhanced monitoring after ready
+            await this.logger.info('Client is ready');
+            await this.webhookManager.sendWebhook('ready', {});
             await this.setupEnhancedMonitoring();
         });
 
-        // Message events with enhanced handling
+        // Message events - delegate to handlers
         this.client.on('message', async (message) => {
-            this.log('debug', `Message received from ${message.from}`);
-            await this.handleEnhancedMessage(message);
-            await this.sendWebhook('message', await this.serializeMessage(message));
+            await this.handleMessage(message, 'message');
         });
 
         this.client.on('message_create', async (message) => {
-            this.log('debug', `Message created: ${message.id._serialized}`);
-            await this.handleEnhancedMessage(message);
-            await this.sendWebhook('message_create', await this.serializeMessage(message));
+            await this.handleMessage(message, 'message_create');
         });
 
         this.client.on('message_ack', async (message, ack) => {
-            this.log('debug', `Message ACK: ${message.id._serialized} - ${ack}`);
-            await this.sendWebhook('message_ack', {
+            await this.logger.debug(`Message ACK: ${message.id._serialized} - ${ack}`);
+            await this.webhookManager.sendWebhook('message_ack', {
                 message: await this.serializeMessage(message),
                 ack
             });
         });
 
-        this.client.on('message_revoke_everyone', async (message, revokedMessage) => {
-            this.log('debug', `Message revoked for everyone: ${message.id._serialized}`);
-            await this.sendWebhook('message_revoke_everyone', {
-                message: await this.serializeMessage(message),
-                revokedMessage: revokedMessage ? await this.serializeMessage(revokedMessage) : null
-            });
-        });
-
-        this.client.on('message_revoke_me', async (message) => {
-            this.log('debug', `Message revoked for me: ${message.id._serialized}`);
-            await this.sendWebhook('message_revoke_me', await this.serializeMessage(message));
-        });
-
-        this.client.on('message_edit', async (message, newBody, prevBody) => {
-            this.log('debug', `Message edited: ${message.id._serialized}`);
-            await this.sendWebhook('message_edit', {
-                message: await this.serializeMessage(message),
-                newBody,
-                prevBody
-            });
-        });
-
-        this.client.on('message_ciphertext', async (message) => {
-            this.log('debug', `Ciphertext message: ${message.id._serialized}`);
-            await this.sendWebhook('message_ciphertext', await this.serializeMessage(message));
-        });
-
-        // Group events
-        this.client.on('group_join', async (notification) => {
-            this.log('debug', `Group join: ${notification.chatId}`);
-            await this.sendWebhook('group_join', this.serializeGroupNotification(notification));
-        });
-
-        this.client.on('group_leave', async (notification) => {
-            this.log('debug', `Group leave: ${notification.chatId}`);
-            await this.sendWebhook('group_leave', this.serializeGroupNotification(notification));
-        });
-
-        this.client.on('group_update', async (notification) => {
-            this.log('debug', `Group update: ${notification.chatId}`);
-            await this.sendWebhook('group_update', this.serializeGroupNotification(notification));
-        });
-
-        this.client.on('group_admin_changed', async (notification) => {
-            this.log('debug', `Group admin changed: ${notification.chatId}`);
-            await this.sendWebhook('group_admin_changed', this.serializeGroupNotification(notification));
-        });
-
-        this.client.on('group_membership_request', async (notification) => {
-            this.log('debug', `Group membership request: ${notification.chatId}`);
-            await this.sendWebhook('group_membership_request', this.serializeGroupNotification(notification));
-        });
-
-        // Contact events
-        this.client.on('contact_changed', async (message, oldId, newId, isContact) => {
-            this.log('debug', `Contact changed: ${oldId} -> ${newId}`);
-            await this.sendWebhook('contact_changed', {
-                message: await this.serializeMessage(message),
-                oldId,
-                newId,
-                isContact
-            });
-        });
-
-        // Chat events
-        this.client.on('chat_removed', async (chat) => {
-            this.log('debug', `Chat removed: ${chat.id._serialized}`);
-            await this.sendWebhook('chat_removed', this.serializeChat(chat));
-        });
-
-        this.client.on('chat_archived', async (chat, currState, prevState) => {
-            this.log('debug', `Chat archived: ${chat.id._serialized}`);
-            await this.sendWebhook('chat_archived', {
-                chat: this.serializeChat(chat),
-                currState,
-                prevState
-            });
-        });
-
-        // Media events
-        this.client.on('media_uploaded', async (message) => {
-            this.log('debug', `Media uploaded: ${message.id._serialized}`);
-            await this.sendWebhook('media_uploaded', await this.serializeMessage(message));
-        });
-
-        // Enhanced call events
+        // Call events - delegate to state manager
         this.client.on('incoming_call', async (call) => {
-            this.log('debug', `Incoming call: ${call.id}`);
             await this.handleIncomingCall(call);
-            await this.sendWebhook('incoming_call', this.serializeCall(call));
         });
 
         this.client.on('call', async (call) => {
-            this.log('debug', `Call event: ${call.id} from ${call.from}`);
             await this.handleIncomingCall(call);
-            await this.sendWebhook('call', this.serializeCall(call));
         });
 
-        // Reaction events
-        this.client.on('message_reaction', async (reaction) => {
-            this.log('debug', `Message reaction: ${reaction.msgId._serialized}`);
-            await this.sendWebhook('message_reaction', this.serializeReaction(reaction));
-        });
-
-        // Enhanced vote events
+        // Poll events - delegate to state manager
         this.client.on('vote_update', async (vote) => {
-            this.log('debug', `Vote update: ${vote.parentMessageId}`);
             await this.handlePollVote(vote);
-            await this.sendWebhook('vote_update', this.serializeVote(vote));
         });
 
         // Connection events
         this.client.on('disconnected', async (reason) => {
-            this.log('warn', `Client disconnected: ${reason}`);
-            await this.sendWebhook('disconnected', { reason });
+            await this.logger.warn(`Client disconnected: ${reason}`);
+            await this.webhookManager.sendWebhook('disconnected', { reason });
             
-            if (this.config.errorHandling.restartOnCrash) {
-                this.log('info', `Restarting client in ${this.config.errorHandling.restartDelay}ms`);
+            if (this.config.errorHandling.restartOnCrash && !this.isShuttingDown) {
+                await this.logger.info(`Restarting client in ${this.config.errorHandling.restartDelay}ms`);
                 setTimeout(() => {
                     this.restart();
                 }, this.config.errorHandling.restartDelay);
             }
         });
 
+        // Other events with basic handling
+        this.setupOtherEventListeners();
+    }
+
+    setupOtherEventListeners() {
+        // Group events
+        this.client.on('group_join', async (notification) => {
+            await this.logger.debug(`Group join: ${notification.chatId}`);
+            await this.webhookManager.sendWebhook('group_join', this.serializeGroupNotification(notification));
+        });
+
+        this.client.on('group_leave', async (notification) => {
+            await this.logger.debug(`Group leave: ${notification.chatId}`);
+            await this.webhookManager.sendWebhook('group_leave', this.serializeGroupNotification(notification));
+        });
+
+        // Other events...
         this.client.on('change_state', async (state) => {
-            this.log('debug', `State changed: ${state}`);
-            await this.sendWebhook('change_state', { state });
+            await this.logger.debug(`State changed: ${state}`);
+            await this.webhookManager.sendWebhook('change_state', { state });
         });
 
         this.client.on('change_battery', async (batteryInfo) => {
-            this.log('debug', `Battery changed: ${batteryInfo.battery}%`);
-            await this.sendWebhook('change_battery', batteryInfo);
-        });
-
-        this.client.on('unread_count', async (chat) => {
-            this.log('debug', `Unread count changed: ${chat.id._serialized}`);
-            await this.sendWebhook('unread_count', this.serializeChat(chat));
+            await this.logger.debug(`Battery changed: ${batteryInfo.battery}%`);
+            await this.webhookManager.sendWebhook('change_battery', batteryInfo);
         });
     }
 
-    async setupBrowserLifecycleMonitoring() {
-        if (!this.config.browserLifecycle || !this.config.browserLifecycle.trackBrowser) return;
-
+    // Enhanced message handling with proper error handling
+    async handleMessage(message, eventType) {
         try {
-            const browser = this.client.pupBrowser;
-            const page = this.client.pupPage;
-
-            // Monitor browser events
-            browser.on('targetcreated', async (target) => {
-                if (target.type() === 'page') {
-                    const newPage = await target.page();
-                    const url = target.url();
-                    const tabId = target._targetId;
-                    
-                    this.browserTabs.set(tabId, {
-                        id: tabId,
-                        url: url,
-                        createdAt: new Date().toISOString(),
-                        page: newPage
-                    });
-
-                    if (this.config.browserLifecycle.logTabEvents) {
-                        this.log('info', `New tab opened: ${tabId} - ${url}`);
-                    }
-
-                    await this.sendWebhook('tab_opened', {
-                        tabId,
-                        url,
-                        timestamp: new Date().toISOString()
-                    });
-                }
-            });
-
-            browser.on('targetdestroyed', async (target) => {
-                if (target.type() === 'page') {
-                    const tabId = target._targetId;
-                    const tabInfo = this.browserTabs.get(tabId);
-                    
-                    if (tabInfo) {
-                        if (this.config.browserLifecycle.logTabEvents) {
-                            this.log('info', `Tab closed: ${tabId} - ${tabInfo.url}`);
-                        }
-
-                        await this.sendWebhook('tab_closed', {
-                            tabId,
-                            url: tabInfo.url,
-                            timestamp: new Date().toISOString(),
-                            duration: Date.now() - new Date(tabInfo.createdAt).getTime()
-                        });
-
-                        this.browserTabs.delete(tabId);
-                    }
-                }
-            });
-
-            // Log browser opened event
-            if (this.config.browserLifecycle.logBrowserEvents) {
-                this.log('info', 'Browser opened and monitoring started');
-            }
-
-            await this.sendWebhook('browser_opened', {
-                timestamp: new Date().toISOString(),
-                userAgent: this.config.browser.userAgent,
-                headless: this.config.browser.headless
-            });
-
-        } catch (error) {
-            this.log('error', 'Failed to setup browser lifecycle monitoring:', error);
-        }
-    }
-
-    async setupEnhancedMonitoring() {
-        try {
-            // Setup advanced anti-detection after ready
-            await this.setupAdvancedAntiDetection();
+            await this.logger.debug(`${eventType}: ${message.id._serialized} from ${message.from}`);
             
-            // Setup poll monitoring
-            await this.setupPollMonitoring();
+            // Serialize message first (for immediate webhook)
+            const messageData = await this.serializeMessage(message);
             
-            // Setup location monitoring
-            await this.setupLocationMonitoring();
-
-        } catch (error) {
-            this.log('error', 'Failed to setup enhanced monitoring:', error);
-        }
-    }
-
-    async setupAdvancedAntiDetection() {
-        if (!this.config.antiDetection.enabled) return;
-
-        try {
-            const page = this.client.pupPage;
-
-            // Hide automation banner and other detection methods
-            await page.evaluateOnNewDocument(() => {
-                // Remove automation banner
-                const style = document.createElement('style');
-                style.innerHTML = `
-                    .infobar, 
-                    [data-test-id="automation-infobar"],
-                    [class*="automation"],
-                    [class*="infobar"] {
-                        display: none !important;
-                        visibility: hidden !important;
-                        opacity: 0 !important;
-                        height: 0 !important;
-                        overflow: hidden !important;
-                    }
-                `;
-                document.head.appendChild(style);
-
-                // Advanced webdriver hiding
-                Object.defineProperty(navigator, 'webdriver', {
-                    get: () => undefined,
-                    configurable: true
-                });
-
-                // Remove automation indicators
-                delete window.cdc_adoQpoasnfa76pfcZLmcfl_Array;
-                delete window.cdc_adoQpoasnfa76pfcZLmcfl_Promise;
-                delete window.cdc_adoQpoasnfa76pfcZLmcfl_Symbol;
-
-                // Override permissions
-                const originalQuery = window.navigator.permissions.query;
-                window.navigator.permissions.query = (parameters) => (
-                    parameters.name === 'notifications' ?
-                        Promise.resolve({ state: Notification.permission }) :
-                        originalQuery(parameters)
-                );
-
-                // Enhanced Chrome object
-                window.chrome = {
-                    runtime: {},
-                    loadTimes: function() {
-                        return {
-                            commitLoadTime: Date.now() / 1000 - Math.random(),
-                            finishDocumentLoadTime: Date.now() / 1000 - Math.random(),
-                            finishLoadTime: Date.now() / 1000 - Math.random(),
-                            firstPaintAfterLoadTime: 0,
-                            firstPaintTime: Date.now() / 1000 - Math.random(),
-                            navigationType: 'Other',
-                            npnNegotiatedProtocol: 'h2',
-                            requestTime: Date.now() / 1000 - Math.random(),
-                            startLoadTime: Date.now() / 1000 - Math.random(),
-                            wasAlternateProtocolAvailable: false,
-                            wasFetchedViaSpdy: true,
-                            wasNpnNegotiated: true
-                        };
-                    },
-                    csi: function() {
-                        return {
-                            startE: Date.now(),
-                            onloadT: Date.now(),
-                            pageT: Date.now(),
-                            tran: 15
-                        };
-                    }
-                };
-            });
-
-            this.log('info', 'Advanced anti-detection measures applied');
-        } catch (error) {
-            this.log('error', 'Failed to setup advanced anti-detection:', error);
-        }
-    }
-
-    async setupPollMonitoring() {
-        if (!this.config.polls || !this.config.polls.trackCreation) return;
-
-        try {
-            // Monitor poll creation and voting through page evaluation
-            const page = this.client.pupPage;
-            
-            await page.evaluateOnNewDocument(() => {
-                // Intercept poll creation
-                const originalFetch = window.fetch;
-                window.fetch = function(...args) {
-                    const [url, options] = args;
-                    
-                    // Monitor poll-related API calls
-                    if (url && url.includes('poll') || (options && options.body && options.body.includes('poll'))) {
-                        window.pollEventDetected && window.pollEventDetected('poll_api_call', { url, options });
-                    }
-                    
-                    return originalFetch.apply(this, args);
-                };
-            });
-
-            // Setup poll event handler
-            await page.exposeFunction('pollEventDetected', async (eventType, data) => {
-                if (this.config.polls.logPollEvents) {
-                    this.log('debug', `Poll event detected: ${eventType}`, data);
-                }
-                
-                await this.sendWebhook('poll_created', {
-                    eventType,
-                    data,
-                    timestamp: new Date().toISOString()
-                });
-            });
-
-            this.log('info', 'Poll monitoring setup completed');
-        } catch (error) {
-            this.log('error', 'Failed to setup poll monitoring:', error);
-        }
-    }
-
-    async setupLocationMonitoring() {
-        if (!this.config.locations || (!this.config.locations.trackStandard && !this.config.locations.trackLive)) return;
-
-        try {
-            this.log('info', 'Location monitoring setup completed');
-        } catch (error) {
-            this.log('error', 'Failed to setup location monitoring:', error);
-        }
-    }
-
-    async handleEnhancedMessage(message) {
-        try {
-            // Handle media downloads
+            // Handle media downloads asynchronously
             if (message.hasMedia && this.config.media.downloadEnabled) {
-                await this.downloadMedia(message);
+                if (this.mediaQueue && this.config.media.queue?.enabled && this.config.media.queue?.processAsync) {
+                    // Queue media download asynchronously
+                    try {
+                        const taskId = await this.mediaQueue.queueDownload(message, messageData);
+                        if (taskId) {
+                            await this.logger.debug(`Media download queued: ${taskId}`);
+                        }
+                    } catch (mediaError) {
+                        await this.logger.error('Failed to queue media download:', mediaError);
+                        // Continue processing - don't fail the entire message
+                    }
+                } else {
+                    // Synchronous media download (legacy behavior)
+                    try {
+                        await this.mediaManager.downloadMedia(message);
+                    } catch (mediaError) {
+                        await this.logger.error('Media download failed:', mediaError);
+                        // Continue processing - don't fail the entire message
+                    }
+                }
             }
 
             // Handle location messages
@@ -698,8 +402,12 @@ class EnhancedWhatsAppDriver {
                 await this.handlePollCreation(message);
             }
 
+            // Send webhook immediately (without waiting for media download)
+            await this.webhookManager.sendWebhook(eventType, messageData);
+
         } catch (error) {
-            this.log('error', 'Failed to handle enhanced message:', error);
+            await this.logger.error(`Failed to handle ${eventType}:`, error);
+            // Don't throw - we want to continue processing other messages
         }
     }
 
@@ -721,12 +429,12 @@ class EnhancedWhatsAppDriver {
             };
 
             if (this.config.locations.logLocationEvents) {
-                this.log('info', `Location message: ${location.latitude}, ${location.longitude} (Live: ${location.isLive})`);
+                await this.logger.info(`Location message: ${location.latitude}, ${location.longitude} (Live: ${location.isLive})`);
             }
 
-            // Save location data if enabled
+            // Save location data
             if (this.config.locations.saveLocationData) {
-                await this.saveLocationData(locationData);
+                await this.stateManager.saveLocationData(locationData);
             }
 
             // Handle live location tracking
@@ -734,8 +442,8 @@ class EnhancedWhatsAppDriver {
                 await this.startLiveLocationTracking(message, locationData);
             }
 
-            // Create payload without body field for location_message event
-            const locationPayload = {
+            // Send location webhook
+            await this.webhookManager.sendWebhook('location_message', {
                 messageId: locationData.messageId,
                 from: locationData.from,
                 timestamp: locationData.timestamp,
@@ -743,101 +451,10 @@ class EnhancedWhatsAppDriver {
                 longitude: locationData.longitude,
                 description: locationData.description,
                 isLive: locationData.isLive
-            };
-
-            await this.sendWebhook('location_message', locationPayload);
+            });
 
         } catch (error) {
-            this.log('error', 'Failed to handle location message:', error);
-        }
-    }
-
-    async startLiveLocationTracking(message, initialLocation) {
-        const trackerId = `${message.from}_${message.id._serialized}`;
-        
-        if (this.liveLocationTrackers.has(trackerId)) {
-            clearInterval(this.liveLocationTrackers.get(trackerId).interval);
-        }
-
-        const tracker = {
-            messageId: message.id._serialized,
-            from: message.from,
-            startTime: new Date().toISOString(),
-            lastUpdate: initialLocation,
-            updateCount: 0
-        };
-
-        // Send start event
-        await this.sendWebhook('live_location_start', {
-            trackerId,
-            ...tracker
-        });
-
-        // Setup periodic updates
-        const interval = setInterval(async () => {
-            try {
-                // In a real implementation, you would fetch the updated location
-                // For now, we'll simulate location updates
-                tracker.updateCount++;
-                tracker.lastUpdate.timestamp = new Date().toISOString();
-                
-                if (this.config.locations.logLocationEvents) {
-                    this.log('debug', `Live location update #${tracker.updateCount} for ${trackerId}`);
-                }
-
-                await this.sendWebhook('live_location_update', {
-                    trackerId,
-                    updateCount: tracker.updateCount,
-                    location: tracker.lastUpdate,
-                    timestamp: new Date().toISOString()
-                });
-
-                // Stop tracking after 8 hours (WhatsApp's default)
-                if (tracker.updateCount > 5760) { // 8 hours * 60 minutes * 12 (5-second intervals)
-                    await this.stopLiveLocationTracking(trackerId);
-                }
-
-            } catch (error) {
-                this.log('error', `Failed to update live location for ${trackerId}:`, error);
-                await this.stopLiveLocationTracking(trackerId);
-            }
-        }, this.config.locations.liveLocationUpdateInterval);
-
-        tracker.interval = interval;
-        this.liveLocationTrackers.set(trackerId, tracker);
-
-        this.log('info', `Started live location tracking: ${trackerId}`);
-    }
-
-    async stopLiveLocationTracking(trackerId) {
-        const tracker = this.liveLocationTrackers.get(trackerId);
-        if (!tracker) return;
-
-        clearInterval(tracker.interval);
-        this.liveLocationTrackers.delete(trackerId);
-
-        await this.sendWebhook('live_location_stop', {
-            trackerId,
-            duration: Date.now() - new Date(tracker.startTime).getTime(),
-            totalUpdates: tracker.updateCount,
-            timestamp: new Date().toISOString()
-        });
-
-        this.log('info', `Stopped live location tracking: ${trackerId}`);
-    }
-
-    async saveLocationData(locationData) {
-        try {
-            const locationFile = path.join(
-                this.config.locations.locationDataPath,
-                `locations_${new Date().toISOString().split('T')[0]}.jsonl`
-            );
-            
-            const logEntry = JSON.stringify(locationData) + '\\n';
-            await fs.appendFile(locationFile, logEntry);
-            
-        } catch (error) {
-            this.log('error', 'Failed to save location data:', error);
+            await this.logger.error('Failed to handle location message:', error);
         }
     }
 
@@ -855,19 +472,16 @@ class EnhancedWhatsAppDriver {
             };
 
             if (this.config.polls.logPollEvents) {
-                this.log('info', `Poll created: ${pollData.pollName} with ${pollData.pollOptions.length} options`);
+                await this.logger.info(`Poll created: ${pollData.pollName} with ${pollData.pollOptions.length} options`);
             }
 
-            this.pollStates.set(message.id._serialized, {
-                ...pollData,
-                votes: new Map(),
-                createdAt: new Date().toISOString()
-            });
+            // Add to state manager
+            this.stateManager.addPoll(message.id._serialized, pollData);
 
-            await this.sendWebhook('poll_created', pollData);
+            await this.webhookManager.sendWebhook('poll_created', pollData);
 
         } catch (error) {
-            this.log('error', 'Failed to handle poll creation:', error);
+            await this.logger.error('Failed to handle poll creation:', error);
         }
     }
 
@@ -875,28 +489,19 @@ class EnhancedWhatsAppDriver {
         if (!this.config.polls || !this.config.polls.trackVotes) return;
 
         try {
-            const pollState = this.pollStates.get(vote.parentMessageId);
+            const pollState = this.stateManager.getPoll(vote.parentMessageId);
             if (!pollState) return;
 
-            // Get full option context
-            const selectedOptionsWithContext = vote.selectedOptions.map(optionIndex => ({
-                index: optionIndex,
-                text: pollState.pollOptions && pollState.pollOptions[optionIndex] 
-                    ? pollState.pollOptions[optionIndex].name || pollState.pollOptions[optionIndex]
-                    : `Option ${optionIndex + 1}`
-            }));
-
+            // Create vote data
             const voteData = {
                 pollId: vote.parentMessageId,
-                messageId: vote.parentMessageId, // Link to poll_created
-                from: vote.sender, // Voter user ID (from)
+                messageId: vote.parentMessageId,
+                from: vote.sender,
                 userId: vote.sender,
-                voterId: vote.sender, // Alias for backward compatibility
+                voterId: vote.sender,
                 selectedOptions: vote.selectedOptions,
-                selectedOptionsWithContext,
-                timestamp: vote.timestamp, // Timestamp of vote
-                voteTimestamp: new Date().toISOString(), // Current timestamp
-                previousVote: pollState.votes.get(vote.sender) || null,
+                timestamp: vote.timestamp,
+                voteTimestamp: new Date().toISOString(),
                 pollInfo: {
                     pollName: pollState.pollName,
                     totalOptions: pollState.pollOptions ? pollState.pollOptions.length : 0,
@@ -906,36 +511,19 @@ class EnhancedWhatsAppDriver {
                 }
             };
 
-            // Update poll state
-            pollState.votes.set(vote.sender, voteData);
-            pollState.lastVoteAt = new Date().toISOString();
-            pollState.totalVotes = pollState.votes.size;
+            // Update state
+            this.stateManager.addPollVote(vote.parentMessageId, vote.sender, voteData);
 
             if (this.config.polls.logPollEvents) {
-                this.log('info', `Poll vote: ${vote.sender} voted for options ${selectedOptionsWithContext.map(opt => opt.text).join(', ')}`);
+                await this.logger.info(`Poll vote: ${vote.sender} voted for options ${vote.selectedOptions.join(', ')}`);
             }
 
-            // Send enhanced vote_update event
-            await this.sendWebhook('vote_update', voteData);
-
-            // Also send poll_vote for backward compatibility
-            await this.sendWebhook('poll_vote', voteData);
-
-            // Send updated poll_created event to reflect new vote count
-            await this.sendWebhook('poll_updated', {
-                messageId: pollState.messageId,
-                pollName: pollState.pollName,
-                pollOptions: pollState.pollOptions,
-                allowMultipleAnswers: pollState.allowMultipleAnswers,
-                from: pollState.from,
-                timestamp: pollState.timestamp,
-                totalVotes: pollState.totalVotes,
-                lastVoteAt: pollState.lastVoteAt,
-                votes: Array.from(pollState.votes.values())
-            });
+            // Send webhooks
+            await this.webhookManager.sendWebhook('vote_update', voteData);
+            await this.webhookManager.sendWebhook('poll_vote', voteData);
 
         } catch (error) {
-            this.log('error', 'Failed to handle poll vote:', error);
+            await this.logger.error('Failed to handle poll vote:', error);
         }
     }
 
@@ -952,231 +540,228 @@ class EnhancedWhatsAppDriver {
                 status: 'incoming'
             };
 
-            this.callStates.set(call.id, callData);
+            // Add to state manager
+            this.stateManager.addCall(call.id, callData);
 
             if (this.config.calls.logCallEvents) {
-                this.log('info', `Incoming ${call.isVideo ? 'video' : 'voice'} call from ${call.peerJid}`);
+                await this.logger.info(`Incoming ${call.isVideo ? 'video' : 'voice'} call from ${call.peerJid}`);
             }
 
             // Auto-reject if configured
             if (this.config.calls.autoReject) {
-                setTimeout(async () => {
+                const timeoutId = setTimeout(async () => {
                     try {
-                        // In a real implementation, you would reject the call here
-                        callData.status = 'rejected';
-                        callData.endTime = new Date().toISOString();
+                        this.stateManager.updateCall(call.id, {
+                            status: 'rejected',
+                            endTime: new Date().toISOString()
+                        });
                         
-                        await this.sendWebhook('call_rejected', callData);
+                        await this.webhookManager.sendWebhook('call_rejected', this.stateManager.getCall(call.id));
                         
                         if (this.config.calls.logCallEvents) {
-                            this.log('info', `Auto-rejected call: ${call.id}`);
+                            await this.logger.info(`Auto-rejected call: ${call.id}`);
                         }
                     } catch (error) {
-                        this.log('error', 'Failed to auto-reject call:', error);
+                        await this.logger.error('Failed to auto-reject call:', error);
                     }
                 }, 1000);
-            }
-
-            // Setup call timeout
-            setTimeout(() => {
-                const currentCall = this.callStates.get(call.id);
-                if (currentCall && currentCall.status === 'incoming') {
-                    currentCall.status = 'ended';
-                    currentCall.endTime = new Date().toISOString();
-                    currentCall.reason = 'timeout';
-                    
-                    this.sendWebhook('call_ended', currentCall);
-                    this.callStates.delete(call.id);
-                }
-            }, this.config.calls.callTimeout);
-
-        } catch (error) {
-            this.log('error', 'Failed to handle incoming call:', error);
-        }
-    }
-
-    // Add LRU eviction in media caching
-    addToMediaCache(key, value) {
-        if (this.mediaCache.size >= this.maxCacheSize) {
-            const firstKey = this.mediaCache.keys().next().value;
-            this.mediaCache.delete(firstKey);
-        }
-        this.mediaCache.set(key, value);
-    }
-
-    // Enhanced media download with better error handling and atomic writes
-    async downloadMedia(message) {
-        try {
-            const media = await message.downloadMedia();
-            if (!media) {
-                this.log('warn', `No media found for message: ${message.id._serialized}`);
-                return;
-            }
-
-            // Check cache to prevent duplicate downloads
-            const cacheKey = this.generateCacheKey(message);
-            if (this.mediaCache.has(cacheKey)) {
-                this.log('debug', `Media already cached: ${cacheKey}`);
-                return;
-            }
-
-            // Determine media type
-            const mediaType = this.getMediaType(media.mimetype);
-            if (!mediaType || !this.config.media.downloadTypes[mediaType]) {
-                this.log('debug', `Media type ${mediaType} not enabled for download`);
-                return;
-            }
-
-            // Check file size
-            const mediaSize = Buffer.from(media.data, 'base64').length;
-            if (mediaSize > this.config.media.maxFileSize) {
-                this.log('warn', `Media file too large: ${mediaSize} bytes`);
-                return;
-            }
-
-            // Generate filename
-            const extension = this.getFileExtension(media.mimetype, media.filename);
-            const filename = this.generateFilename(message, extension);
-            
-            // Determine save path
-            const savePath = this.config.media.organizeByType 
-                ? path.join(this.config.media.downloadPath, mediaType, filename)
-                : path.join(this.config.media.downloadPath, filename);
-
-            // Save file atomically
-            const tempPath = savePath + '.tmp';
-            await fs.writeFile(tempPath, media.data, 'base64');
-            await fs.rename(tempPath, savePath);
-            
-            // Update cache with LRU eviction
-            const cacheEntry = {
-                messageId: message.id._serialized,
-                filename,
-                path: savePath,
-                mediaType,
-                mimetype: media.mimetype,
-                size: mediaSize,
-                downloadedAt: new Date().toISOString()
-            };
-            
-            this.addToMediaCache(cacheKey, cacheEntry);
-            await this.saveMediaCache();
-
-            this.log('info', `Media downloaded: ${filename} (${mediaType})`);
-        } catch (error) {
-            this.log('error', 'Failed to download media:', error);
-        }
-    }
-
-    generateCacheKey(message) {
-        return `${message.id._serialized}_${message.timestamp}`;
-    }
-
-    getMediaType(mimetype) {
-        if (!mimetype) return null;
-
-        if (mimetype.startsWith('image/')) return 'image';
-        if (mimetype.startsWith('video/')) return 'video';
-        if (mimetype.startsWith('audio/')) return 'audio';
-        if (mimetype === 'image/webp') return 'sticker';
-        if (mimetype.includes('ogg') || mimetype.includes('opus')) return 'voice';
-        return 'document';
-    }
-
-    getFileExtension(mimetype, filename) {
-        if (filename && filename.includes('.')) {
-            return path.extname(filename);
-        }
-
-        const mimeToExt = {
-            'image/jpeg': '.jpg',
-            'image/png': '.png',
-            'image/gif': '.gif',
-            'image/webp': '.webp',
-            'video/mp4': '.mp4',
-            'video/webm': '.webm',
-            'audio/mpeg': '.mp3',
-            'audio/ogg': '.ogg',
-            'audio/wav': '.wav',
-            'application/pdf': '.pdf',
-            'text/plain': '.txt'
-        };
-
-        return mimeToExt[mimetype] || '.bin';
-    }
-
-    generateFilename(message, extension) {
-        const timestamp = new Date(message.timestamp * 1000).toISOString().replace(/[:.]/g, '-');
-        const messageId = message.id._serialized.replace(/[^a-zA-Z0-9]/g, '_');
-        return `${timestamp}_${messageId}${extension}`;
-    }
-
-    async sendWebhook(event, data) {
-        if (!this.config.webhook.enabled) return;
-        if (!this.config.webhook.events.includes(event)) return;
-
-        const payload = {
-            event,
-            timestamp: new Date().toISOString(),
-            data
-        };
-
-        this.webhookQueue.push(payload);
-        
-        if (!this.isProcessingWebhooks) {
-            this.processWebhookQueue();
-        }
-    }
-
-    async processWebhookQueue() {
-        this.isProcessingWebhooks = true;
-
-        while (this.webhookQueue.length > 0) {
-            const payload = this.webhookQueue.shift();
-            
-            try {
-                await this.sendWebhookRequest(payload);
-            } catch (error) {
-                this.log('error', 'Failed to send webhook:', error);
                 
-                // Retry logic
-                let retryCount = 0;
-                while (retryCount < this.config.webhook.retryAttempts) {
-                    try {
-                        await new Promise(resolve => setTimeout(resolve, this.config.webhook.retryDelay));
-                        await this.sendWebhookRequest(payload);
-                        break;
-                    } catch (retryError) {
-                        retryCount++;
-                        this.log('warn', `Webhook retry ${retryCount} failed:`, retryError);
-                    }
-                }
+                this.stateManager.addTimeout(timeoutId);
             }
-        }
 
-        this.isProcessingWebhooks = false;
+            // Send webhook
+            await this.webhookManager.sendWebhook('incoming_call', this.serializeCall(call));
+
+        } catch (error) {
+            await this.logger.error('Failed to handle incoming call:', error);
+        }
     }
 
-    async sendWebhookRequest(payload) {
-        const response = await fetch(this.config.webhook.url, {
-            method: 'POST',
-            headers: {
-                'Content-Type': 'application/json',
-                'User-Agent': 'WhatsApp-Enhanced-Driver/1.0'
-            },
-            body: JSON.stringify(payload),
-            timeout: 10000,
-            agent: this.httpAgent
+    async startLiveLocationTracking(message, initialLocation) {
+        const trackerId = `${message.from}_${message.id._serialized}`;
+        
+        // Stop existing tracker if any
+        const existingTracker = this.stateManager.getLiveLocationTracker(trackerId);
+        if (existingTracker && existingTracker.interval) {
+            clearInterval(existingTracker.interval);
+        }
+
+        const tracker = {
+            messageId: message.id._serialized,
+            from: message.from,
+            startTime: new Date().toISOString(),
+            lastUpdate: initialLocation,
+            updateCount: 0
+        };
+
+        // Add to state manager
+        this.stateManager.addLiveLocationTracker(trackerId, tracker);
+
+        // Send start event
+        await this.webhookManager.sendWebhook('live_location_start', {
+            trackerId,
+            ...tracker
         });
 
-        if (!response.ok) {
-            throw new Error(`Webhook request failed: ${response.status} ${response.statusText}`);
-        }
+        // Setup periodic updates
+        const interval = setInterval(async () => {
+            try {
+                const currentTracker = this.stateManager.getLiveLocationTracker(trackerId);
+                if (!currentTracker) {
+                    clearInterval(interval);
+                    return;
+                }
 
-        this.log('debug', `Webhook sent: ${payload.event}`);
+                currentTracker.updateCount++;
+                currentTracker.lastUpdate.timestamp = new Date().toISOString();
+                
+                this.stateManager.updateLiveLocationTracker(trackerId, currentTracker);
+                
+                if (this.config.locations.logLocationEvents) {
+                    await this.logger.debug(`Live location update #${currentTracker.updateCount} for ${trackerId}`);
+                }
+
+                await this.webhookManager.sendWebhook('live_location_update', {
+                    trackerId,
+                    updateCount: currentTracker.updateCount,
+                    location: currentTracker.lastUpdate,
+                    timestamp: new Date().toISOString()
+                });
+
+                // Stop tracking after 8 hours (WhatsApp's default)
+                if (currentTracker.updateCount > 5760) {
+                    await this.stopLiveLocationTracking(trackerId);
+                }
+
+            } catch (error) {
+                await this.logger.error(`Failed to update live location for ${trackerId}:`, error);
+                await this.stopLiveLocationTracking(trackerId);
+            }
+        }, this.config.locations.liveLocationUpdateInterval);
+
+        // Store interval in tracker
+        this.stateManager.updateLiveLocationTracker(trackerId, { interval });
+
+        await this.logger.info(`Started live location tracking: ${trackerId}`);
     }
 
-    // Enhanced serialization methods
+    async stopLiveLocationTracking(trackerId) {
+        const tracker = this.stateManager.getLiveLocationTracker(trackerId);
+        if (!tracker) return;
+
+        if (tracker.interval) {
+            clearInterval(tracker.interval);
+        }
+
+        this.stateManager.removeLiveLocationTracker(trackerId);
+
+        await this.webhookManager.sendWebhook('live_location_stop', {
+            trackerId,
+            duration: Date.now() - new Date(tracker.startTime).getTime(),
+            totalUpdates: tracker.updateCount,
+            timestamp: new Date().toISOString()
+        });
+
+        await this.logger.info(`Stopped live location tracking: ${trackerId}`);
+    }
+
+    async setupBrowserLifecycleMonitoring() {
+        if (!this.config.browserLifecycle || !this.config.browserLifecycle.trackBrowser) return;
+
+        try {
+            const browser = this.client.pupBrowser;
+
+            browser.on('targetcreated', async (target) => {
+                if (target.type() === 'page') {
+                    const url = target.url();
+                    const tabId = target._targetId;
+                    
+                    this.stateManager.addBrowserTab(tabId, {
+                        id: tabId,
+                        url: url,
+                        createdAt: new Date().toISOString()
+                    });
+
+                    if (this.config.browserLifecycle.logTabEvents) {
+                        await this.logger.info(`New tab opened: ${tabId} - ${url}`);
+                    }
+
+                    await this.webhookManager.sendWebhook('tab_opened', {
+                        tabId,
+                        url,
+                        timestamp: new Date().toISOString()
+                    });
+                }
+            });
+
+            browser.on('targetdestroyed', async (target) => {
+                if (target.type() === 'page') {
+                    const tabId = target._targetId;
+                    const tabInfo = this.stateManager.getBrowserTab(tabId);
+                    
+                    if (tabInfo) {
+                        if (this.config.browserLifecycle.logTabEvents) {
+                            await this.logger.info(`Tab closed: ${tabId} - ${tabInfo.url}`);
+                        }
+
+                        await this.webhookManager.sendWebhook('tab_closed', {
+                            tabId,
+                            url: tabInfo.url,
+                            timestamp: new Date().toISOString(),
+                            duration: Date.now() - new Date(tabInfo.createdAt).getTime()
+                        });
+
+                        this.stateManager.removeBrowserTab(tabId);
+                    }
+                }
+            });
+
+            await this.webhookManager.sendWebhook('browser_opened', {
+                timestamp: new Date().toISOString(),
+                userAgent: this.config.browser.userAgent,
+                headless: this.config.browser.headless
+            });
+
+        } catch (error) {
+            await this.logger.error('Failed to setup browser lifecycle monitoring:', error);
+        }
+    }
+
+    async setupEnhancedMonitoring() {
+        try {
+            await this.setupAdvancedAntiDetection();
+            await this.logger.info('Enhanced monitoring setup completed');
+        } catch (error) {
+            await this.logger.error('Failed to setup enhanced monitoring:', error);
+        }
+    }
+
+    async setupAdvancedAntiDetection() {
+        if (!this.config.antiDetection.enabled) return;
+
+        try {
+            const page = this.client.pupPage;
+
+            await page.evaluateOnNewDocument(() => {
+                // Anti-detection measures
+                Object.defineProperty(navigator, 'webdriver', {
+                    get: () => undefined,
+                    configurable: true
+                });
+
+                // Remove automation indicators
+                delete window.cdc_adoQpoasnfa76pfcZLmcfl_Array;
+                delete window.cdc_adoQpoasnfa76pfcZLmcfl_Promise;
+                delete window.cdc_adoQpoasnfa76pfcZLmcfl_Symbol;
+            });
+
+            await this.logger.info('Advanced anti-detection measures applied');
+        } catch (error) {
+            await this.logger.error('Failed to setup advanced anti-detection:', error);
+        }
+    }
+
+    // Serialization methods
     async serializeMessage(message) {
         const serialized = {
             id: message.id,
@@ -1222,16 +807,16 @@ class EnhancedWhatsAppDriver {
             };
         }
 
+        // Add media info if available
         if (message.hasMedia && this.config.media.downloadEnabled) {
-            const cacheKey = this.generateCacheKey(message);
-            const cacheEntry = this.mediaCache.get(cacheKey);
-            if (cacheEntry) {
+            const mediaInfo = await this.mediaManager.getMediaInfo(message);
+            if (mediaInfo) {
                 serialized.mediaInfo = {
-                    filename: cacheEntry.filename,
-                    path: cacheEntry.path,
-                    mediaType: cacheEntry.mediaType,
-                    mimetype: cacheEntry.mimetype,
-                    size: cacheEntry.size
+                    filename: mediaInfo.filename,
+                    path: mediaInfo.path,
+                    mediaType: mediaInfo.mediaType,
+                    mimetype: mediaInfo.mimetype,
+                    size: mediaInfo.size
                 };
             }
         }
@@ -1251,95 +836,37 @@ class EnhancedWhatsAppDriver {
         };
     }
 
-    serializeChat(chat) {
-        return {
-            id: chat.id,
-            name: chat.name,
-            isGroup: chat.isGroup,
-            isReadOnly: chat.isReadOnly,
-            unreadCount: chat.unreadCount,
-            timestamp: chat.timestamp,
-            archived: chat.archived,
-            pinned: chat.pinned,
-            isMuted: chat.isMuted,
-            muteExpiration: chat.muteExpiration
-        };
-    }
-
     serializeCall(call) {
-        // Enhanced call serialization with complete metadata
-        const callData = {
+        return {
             id: call.id,
-            from: call.from || call.peerJid, // Caller user ID
-            to: call.to || null, // Callee user ID(s)
-            peerJid: call.peerJid, // Keep for backward compatibility
-            direction: call.fromMe ? 'outgoing' : 'incoming', // Call direction
-            callType: call.isVideo ? 'video' : 'voice', // Call type
-            contextType: call.isGroup ? 'group' : '1:1', // Context type
+            from: call.from || call.peerJid,
+            to: call.to || null,
+            peerJid: call.peerJid,
+            direction: call.fromMe ? 'outgoing' : 'incoming',
+            callType: call.isVideo ? 'video' : 'voice',
+            contextType: call.isGroup ? 'group' : '1:1',
             isVideo: call.isVideo,
             isGroup: call.isGroup,
-            fromMe: call.fromMe || false, // Direction indicator
-            canHandleLocally: call.canHandleLocally,
-            outgoing: call.outgoing,
-            webClientShouldHandle: call.webClientShouldHandle,
+            fromMe: call.fromMe || false,
             participants: call.participants || [],
-            timestamp: call.timestamp ? new Date(call.timestamp * 1000).toISOString() : new Date().toISOString(),
-            
-            // Enhanced metadata
-            callMetadata: {
-                caller: call.fromMe ? 'me' : call.from || call.peerJid,
-                callee: call.fromMe ? (call.to || call.peerJid) : 'me',
-                direction: call.fromMe ? 'outgoing' : 'incoming',
-                type: `${call.isVideo ? 'video' : 'voice'}_${call.isGroup ? 'group' : 'direct'}`,
-                context: call.isGroup ? 'group_call' : 'direct_call'
-            }
-        };
-
-        // Add group-specific information
-        if (call.isGroup && call.participants) {
-            callData.groupInfo = {
-                participantCount: call.participants.length,
-                participants: call.participants
-            };
-        }
-
-        return callData;
-    }
-
-    serializeReaction(reaction) {
-        return {
-            id: reaction.id,
-            msgId: reaction.msgId,
-            reaction: reaction.reaction,
-            timestamp: reaction.timestamp,
-            senderId: reaction.senderId,
-            ack: reaction.ack
+            timestamp: call.timestamp ? new Date(call.timestamp * 1000).toISOString() : new Date().toISOString()
         };
     }
 
-    serializeVote(vote) {
-        return {
-            id: vote.id,
-            parentMessageId: vote.parentMessageId,
-            selectedOptions: vote.selectedOptions,
-            timestamp: vote.timestamp,
-            sender: vote.sender
-        };
-    }
-
+    // Lifecycle methods
     async start() {
         try {
-            this.log('info', 'Starting Enhanced WhatsApp client...');
+            await this.logger.info('Starting Enhanced WhatsApp client...');
             await this.client.initialize();
         } catch (error) {
-            this.log('error', 'Failed to start enhanced client:', error);
+            await this.logger.error('Failed to start enhanced client:', error);
             
             if (this.config.errorHandling.crashOnError) {
                 throw error;
             }
             
-            if (this.config.errorHandling.restartOnCrash) {
-                this.log('info', `Restarting in ${this.config.errorHandling.restartDelay}ms`);
+            if (this.config.errorHandling.restartOnCrash && !this.isShuttingDown) {
+                await this.logger.info(`Restarting in ${this.config.errorHandling.restartDelay}ms`);
                 setTimeout(() => {
                     this.restart();
                 }, this.config.errorHandling.restartDelay);
@@ -1347,114 +874,125 @@ class EnhancedWhatsAppDriver {
         }
     }
 
-    async stop() {
+    async gracefulShutdown() {
+        if (this.isShuttingDown) return;
+        
+        this.isShuttingDown = true;
+        await this.logger.info('Starting graceful shutdown...');
+
         try {
-            this.log('info', 'Stopping Enhanced WhatsApp client...');
-            
-            // Clear all active timeouts
-            for (const timeoutId of this.activeTimeouts) {
-                clearTimeout(timeoutId);
-            }
-            this.activeTimeouts.clear();
-            
             // Abort any ongoing operations
             this.abortController.abort();
             
-            // Stop all live location trackers
-            for (const [trackerId, tracker] of this.liveLocationTrackers) {
-                await this.stopLiveLocationTracking(trackerId);
+            // Cleanup managers
+            if (this.stateManager) {
+                await this.stateManager.cleanup();
+            }
+            
+            if (this.mediaManager) {
+                await this.mediaManager.cleanup();
+            }
+            
+            if (this.webhookManager) {
+                await this.webhookManager.cleanup();
+            }
+            
+            if (this.mediaQueue) {
+                await this.mediaQueue.cleanup();
+            }
+            
+            // Stop StateAPI
+            if (this.stateAPI) {
+                await this.stateAPI.stop();
             }
             
             // Send browser closed event
             if (this.config.browserLifecycle && this.config.browserLifecycle.trackBrowser) {
-                await this.sendWebhook('browser_closed', {
+                await this.webhookManager.sendWebhook('browser_closed', {
                     timestamp: new Date().toISOString(),
-                    totalTabs: this.browserTabs.size
+                    totalTabs: this.stateManager.getAllBrowserTabs().length
                 });
             }
             
-            // Destroy HTTP agent
-            if (this.httpAgent) {
-                this.httpAgent.destroy();
-            }
-            
+            // Destroy client
             if (this.client) {
                 await this.client.destroy();
             }
-            await this.saveMediaCache();
-            this.log('info', 'Enhanced WhatsApp client stopped');
+            
+            await this.logger.info('Graceful shutdown completed');
         } catch (error) {
-            this.log('error', 'Failed to stop enhanced client:', error);
+            await this.logger.error('Error during graceful shutdown:', error);
         }
     }
 
     async restart() {
         try {
-            this.log('info', 'Restarting Enhanced WhatsApp client...');
-            await this.stop();
+            await this.logger.info('Restarting Enhanced WhatsApp client...');
+            await this.gracefulShutdown();
             await new Promise(resolve => setTimeout(resolve, 2000));
+            this.isShuttingDown = false;
             await this.initialize();
             await this.start();
         } catch (error) {
-            this.log('error', 'Failed to restart enhanced client:', error);
+            await this.logger.error('Failed to restart enhanced client:', error);
         }
     }
 
-    // Enhanced utility methods
+    // Signal handlers for graceful shutdown
+    setupSignalHandlers() {
+        process.on('SIGTERM', async () => {
+            console.log('\n🛑 Received SIGTERM, shutting down Enhanced WhatsApp Driver...');
+            await this.gracefulShutdown();
+            process.exit(0);
+        });
+
+        process.on('SIGINT', async () => {
+            console.log('\n🛑 Received SIGINT, shutting down Enhanced WhatsApp Driver...');
+            await this.gracefulShutdown();
+            process.exit(0);
+        });
+
+        process.on('uncaughtException', async (error) => {
+            console.error('💥 Uncaught Exception:', error);
+            await this.logger.error('Uncaught Exception:', error);
+            await this.gracefulShutdown();
+            process.exit(1);
+        });
+
+        process.on('unhandledRejection', async (reason, promise) => {
+            console.error('💥 Unhandled Rejection at:', promise, 'reason:', reason);
+            await this.logger.error('Unhandled Rejection:', { reason, promise });
+            await this.gracefulShutdown();
+            process.exit(1);
+        });
+    }
+
+    // Statistics and health
     async getStats() {
-        return {
-            cacheSize: this.mediaCache.size,
-            webhookQueueSize: this.webhookQueue.length,
-            isProcessingWebhooks: this.isProcessingWebhooks,
-            clientState: this.client ? await this.client.getState() : 'not_initialized',
-            liveLocationTrackers: this.liveLocationTrackers.size,
-            browserTabs: this.browserTabs.size,
-            activeCalls: this.callStates.size,
-            activePolls: this.pollStates.size,
+        const stats = {
             uptime: process.uptime(),
-            memoryUsage: process.memoryUsage()
+            memoryUsage: process.memoryUsage(),
+            clientState: this.client ? await this.client.getState() : 'not_initialized',
+            isShuttingDown: this.isShuttingDown
         };
-    }
 
-    async clearCache() {
-        this.mediaCache.clear();
-        await this.saveMediaCache();
-        this.log('info', 'Media cache cleared');
-    }
+        if (this.mediaManager) {
+            stats.media = await this.mediaManager.getStats();
+        }
 
-    async updateConfig(newConfig) {
-        this.config = { ...this.config, ...newConfig };
-        await fs.writeFile(this.configPath, JSON.stringify(this.config, null, 2));
-        this.log('info', 'Configuration updated');
-    }
+        if (this.stateManager) {
+            stats.state = await this.stateManager.getStats();
+        }
 
-    // New utility methods
-    async getLiveLocationTrackers() {
-        return Array.from(this.liveLocationTrackers.entries()).map(([id, tracker]) => ({
-            id,
-            ...tracker,
-            interval: undefined // Don't serialize the interval
-        }));
-    }
+        if (this.webhookManager) {
+            stats.webhooks = await this.webhookManager.getStats();
+        }
 
-    async getBrowserTabs() {
-        return Array.from(this.browserTabs.entries()).map(([id, tab]) => ({
-            id,
-            url: tab.url,
-            createdAt: tab.createdAt
-        }));
-    }
+        if (this.mediaQueue) {
+            stats.mediaQueue = await this.mediaQueue.getStats();
+        }
 
-    async getActiveCalls() {
-        return Array.from(this.callStates.values());
-    }
-
-    async getActivePolls() {
-        return Array.from(this.pollStates.entries()).map(([id, poll]) => ({
-            id,
-            ...poll,
-            votes: Array.from(poll.votes.values())
-        }));
+        return stats;
     }
 }
 
@@ -1469,29 +1007,6 @@ async function main() {
         console.error('Failed to start Enhanced WhatsApp Driver:', error);
         process.exit(1);
     }
-    
-    // Handle graceful shutdown
-    process.on('SIGINT', async () => {
-        console.log('\n🛑 Shutting down Enhanced WhatsApp Driver...');
-        try {
-            await driver.stop();
-            process.exit(0);
-        } catch (error) {
-            console.error('Error during shutdown:', error);
-            process.exit(1);
-        }
-    });
-    
-    process.on('SIGTERM', async () => {
-        console.log('\n🛑 Shutting down Enhanced WhatsApp Driver...');
-        try {
-            await driver.stop();
-            process.exit(0);
-        } catch (error) {
-            console.error('Error during shutdown:', error);
-            process.exit(1);
-        }
-    });
 }
 
 // Start the driver if this file is run directly

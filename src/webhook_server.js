@@ -1,6 +1,7 @@
 const express = require('express');
 const fs = require('fs').promises;
 const path = require('path');
+const { createLoggerFromConfig } = require('./logger');
 
 class EnhancedWebhookServer {
     constructor(port = 3001) {
@@ -12,8 +13,80 @@ class EnhancedWebhookServer {
         this.activeCalls = new Map();
         this.activePolls = new Map();
         this.browserTabs = new Map();
-        this.setupMiddleware();
-        this.setupRoutes();
+        this.config = null;
+        this.logger = null;
+    }
+
+    async initialize() {
+        try {
+            // Load configuration
+            await this.loadConfig();
+            
+            // Initialize logger
+            await this.initializeLogger();
+            
+            // Setup middleware and routes
+            this.setupMiddleware();
+            this.setupRoutes();
+            
+            await this.log('info', 'Enhanced Webhook Server initialized successfully');
+        } catch (error) {
+            console.error('Failed to initialize Enhanced Webhook Server:', error);
+            throw error;
+        }
+    }
+
+    async loadConfig() {
+        try {
+            // Load default configuration
+            const configPath = path.join(__dirname, '..', 'config', 'default.json');
+            const configData = await fs.readFile(configPath, 'utf8');
+            this.config = JSON.parse(configData);
+            
+            // Load production overrides if NODE_ENV is production
+            if (process.env.NODE_ENV === 'production') {
+                try {
+                    const prodConfigPath = path.join(__dirname, '..', 'config', 'production.json');
+                    const prodConfigData = await fs.readFile(prodConfigPath, 'utf8');
+                    const prodConfig = JSON.parse(prodConfigData);
+                    this.config = this.mergeConfig(this.config, prodConfig);
+                } catch (error) {
+                    console.warn('⚠️  Production config not found, using default config');
+                }
+            }
+            
+            await this.log('info', 'Configuration loaded successfully');
+        } catch (error) {
+            console.error('Failed to load configuration:', error);
+            throw new Error(`Failed to load configuration: ${error.message}`);
+        }
+    }
+
+    mergeConfig(defaultConfig, overrideConfig) {
+        const merged = { ...defaultConfig };
+        
+        for (const [key, value] of Object.entries(overrideConfig)) {
+            if (typeof value === 'object' && value !== null && !Array.isArray(value)) {
+                merged[key] = this.mergeConfig(merged[key] || {}, value);
+            } else {
+                merged[key] = value;
+            }
+        }
+        
+        return merged;
+    }
+
+    async initializeLogger() {
+        // Use centralized logger from logger.js
+        this.logger = createLoggerFromConfig(this.config);
+    }
+
+    async log(level, message, data = null) {
+        if (this.logger) {
+            await this.logger[level](message, data);
+        } else {
+            console.log(`[${level.toUpperCase()}] ${message}`, data || '');
+        }
     }
 
     setupMiddleware() {
@@ -40,8 +113,8 @@ class EnhancedWebhookServer {
         });
 
         // Logging middleware
-        this.app.use((req, res, next) => {
-            console.log(`${new Date().toISOString()} - ${req.method} ${req.path}`);
+        this.app.use(async (req, res, next) => {
+            await this.log('debug', `${req.method} ${req.path}`);
             next();
         });
     }
@@ -455,20 +528,22 @@ class EnhancedWebhookServer {
 if (require.main === module) {
     const server = new EnhancedWebhookServer(3001);
     
-    server.start().catch(error => {
+    server.initialize().then(() => {
+        return server.start();
+    }).catch(error => {
         console.error('Failed to start enhanced webhook server:', error);
         process.exit(1);
     });
 
     // Handle graceful shutdown
     process.on('SIGINT', async () => {
-        console.log('\\nReceived SIGINT, shutting down enhanced webhook server...');
+        console.log('\nReceived SIGINT, shutting down enhanced webhook server...');
         await server.stop();
         process.exit(0);
     });
 
     process.on('SIGTERM', async () => {
-        console.log('\\nReceived SIGTERM, shutting down enhanced webhook server...');
+        console.log('\nReceived SIGTERM, shutting down enhanced webhook server...');
         await server.stop();
         process.exit(0);
     });
