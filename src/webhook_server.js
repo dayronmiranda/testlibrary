@@ -17,6 +17,9 @@ class EnhancedWebhookServer {
     }
 
     setupMiddleware() {
+        // Serve static files from public directory
+        this.app.use(express.static(path.join(__dirname, '..', 'public')));
+        
         // Parse JSON bodies
         this.app.use(express.json({ limit: '50mb' }));
         
@@ -191,25 +194,31 @@ class EnhancedWebhookServer {
         // Serve enhanced dashboard
         this.app.get('/', async (req, res) => {
             try {
-                const dashboardPath = path.join(__dirname, 'enhanced_dashboard.html');
+                const dashboardPath = path.join(__dirname, '..', 'public', 'dashboard.html');
                 const dashboardContent = await fs.readFile(dashboardPath, 'utf8');
                 res.send(dashboardContent);
             } catch (error) {
                 console.error('Error serving dashboard:', error);
                 // Fallback to basic dashboard
-                res.send(`
-                <html>
-                <head><title>Enhanced WhatsApp Dashboard</title></head>
-                <body>
-                    <h1>Enhanced WhatsApp Dashboard</h1>
-                    <p>Dashboard loading error. Please check server logs.</p>
-                    <a href="/events">View Events</a> | 
-                    <a href="/stats">View Stats</a> | 
-                    <a href="/calls">View Calls</a> | 
-                    <a href="/polls">View Polls</a>
-                </body>
-                </html>
-                `);
+                try {
+                    const fallbackPath = path.join(__dirname, '..', 'public', 'dashboard_fallback.html');
+                    const fallbackContent = await fs.readFile(fallbackPath, 'utf8');
+                    res.send(fallbackContent);
+                } catch (fallbackError) {
+                    res.send(`
+                    <html>
+                    <head><title>Enhanced WhatsApp Dashboard</title></head>
+                    <body>
+                        <h1>Enhanced WhatsApp Dashboard</h1>
+                        <p>Dashboard loading error. Please check server logs.</p>
+                        <a href="/events">View Events</a> | 
+                        <a href="/stats">View Stats</a> | 
+                        <a href="/calls">View Calls</a> | 
+                        <a href="/polls">View Polls</a>
+                    </body>
+                    </html>
+                    `);
+                }
             }
         });
 

@@ -1,33 +1,33 @@
 ﻿'use strict';
 
 module.exports = {
-    Client: require('./src/Client'),
+    Client: require('./lib/Client'),
     auth: {
-        BaseAuthStrategy: require('./src/BaseAuthStrategy'),
-        LocalAuth: require('./src/LocalAuth'),
-        RemoteAuth: require('./src/RemoteAuth'),
-        NoAuth: require('./src/NoAuth'),
+        BaseAuthStrategy: require('./lib/BaseAuthStrategy'),
+        LocalAuth: require('./lib/LocalAuth'),
+        RemoteAuth: require('./lib/RemoteAuth'),
+        NoAuth: require('./lib/NoAuth'),
     },
     stores: {
-        Store: require('./src/Store'),
-        AuthStore: require('./src/AuthStore')
+        Store: require('./lib/Store'),
+        AuthStore: require('./lib/AuthStore')
     },
     factories: {
-        ChatFactory: require('./src/ChatFactory'),
-        ContactFactory: require('./src/ContactFactory'),
+        ChatFactory: require('./lib/ChatFactory'),
+        ContactFactory: require('./lib/ContactFactory'),
     },
-    structures: require('./src/structures'),
+    structures: require('./lib/structures'),
     util: {
-        Constants: require('./src/Constants'),
-        Util: require('./src/Util'),
-        Utils: require('./src/Utils'),
-        Puppeteer: require('./src/Puppeteer'),
-        InterfaceController: require('./src/InterfaceController'),
+        Constants: require('./lib/Constants'),
+        Util: require('./lib/Util'),
+        Utils: require('./lib/Utils'),
+        Puppeteer: require('./lib/Puppeteer'),
+        InterfaceController: require('./lib/InterfaceController'),
     },
     webcache: {
-        WebCache: require('./src/WebCache'),
-        LocalWebCache: require('./src/LocalWebCache'),
-        RemoteWebCache: require('./src/RemoteWebCache'),
-        WebCacheFactory: require('./src/WebCacheFactory'),
+        WebCache: require('./lib/WebCache'),
+        LocalWebCache: require('./lib/LocalWebCache'),
+        RemoteWebCache: require('./lib/RemoteWebCache'),
+        WebCacheFactory: require('./lib/WebCacheFactory'),
     }
 };

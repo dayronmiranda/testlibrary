@@ -5,6 +5,9 @@
   "main": "./index.js",
   "typings": "./index.d.ts",
   "scripts": {
+    "start": "node src/app.js",
+    "dev": "nodemon src/app.js",
+    "validate-config": "node src/config_validator.js",
     "lint": "eslint .",
     "docs": "npx jsdoc --configure .jsdoc.json --verbose",
     "test": "mocha"

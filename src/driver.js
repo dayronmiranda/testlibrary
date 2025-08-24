@@ -1,4 +1,4 @@
-const { Client, LocalAuth, NoAuth } = require('./index.js');
+const { Client, LocalAuth, NoAuth } = require('../index.js');
 const fs = require('fs').promises;
 const path = require('path');
 const fetch = require('node-fetch');
@@ -7,7 +7,7 @@ const https = require('https');
 const http = require('http');
 
 class EnhancedWhatsAppDriver {
-    constructor(configPath = './config.json') {
+    constructor(configPath = './config/default.json') {
         this.configPath = configPath;
         this.config = null;
         this.client = null;
