@@ -1,0 +1,728 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Enhanced WhatsApp Webhook Dashboard</title>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline';">
+    <style>
+        * { box-sizing: border-box; }
+        body { 
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; 
+            margin: 0; 
+            padding: 20px; 
+            background: linear-gradient(135deg, #f5f7fa 0%, #c3cfe2 100%);
+            min-height: 100vh;
+        }
+        .container { max-width: 1400px; margin: 0 auto; }
+        .header { 
+            background: linear-gradient(135deg, #25D366 0%, #128C7E 100%); 
+            color: white; 
+            padding: 30px; 
+            border-radius: 15px; 
+            margin-bottom: 30px; 
+            box-shadow: 0 8px 32px rgba(37, 211, 102, 0.3);
+        }
+        .header h1 { margin: 0; font-size: 2.5em; font-weight: 300; }
+        .header p { margin: 10px 0 0 0; opacity: 0.9; font-size: 1.1em; }
+        
+        .stats-grid { 
+            display: grid; 
+            grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); 
+            gap: 20px; 
+            margin-bottom: 30px; 
+        }
+        .stat-card { 
+            background: white; 
+            padding: 25px; 
+            border-radius: 15px; 
+            box-shadow: 0 4px 20px rgba(0,0,0,0.08); 
+            transition: transform 0.3s ease, box-shadow 0.3s ease;
+            border-left: 5px solid #25D366;
+        }
+        .stat-card:hover { 
+            transform: translateY(-5px); 
+            box-shadow: 0 8px 30px rgba(0,0,0,0.12); 
+        }
+        .stat-number { 
+            font-size: 2.5em; 
+            font-weight: bold; 
+            color: #25D366; 
+            margin-bottom: 5px;
+        }
+        .stat-label { 
+            color: #666; 
+            font-size: 1.1em; 
+            font-weight: 500;
+        }
+        
+        .controls { 
+            background: white; 
+            padding: 20px; 
+            border-radius: 15px; 
+            margin-bottom: 30px; 
+            box-shadow: 0 4px 20px rgba(0,0,0,0.08);
+            display: flex;
+            flex-wrap: wrap;
+            gap: 10px;
+            align-items: center;
+        }
+        button { 
+            padding: 12px 20px; 
+            border: none; 
+            border-radius: 8px; 
+            cursor: pointer; 
+            font-weight: 600; 
+            font-size: 14px;
+            transition: all 0.3s ease;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+        button:hover { transform: translateY(-2px); box-shadow: 0 4px 12px rgba(0,0,0,0.15); }
+        .refresh { background: #25D366; color: white; }
+        .clear { background: #dc3545; color: white; }
+        .filter { background: #007bff; color: white; }
+        .auto-refresh { background: #28a745; color: white; }
+        .auto-refresh.active { background: #155724; }
+        
+        .status-indicator {
+            display: inline-block;
+            width: 12px;
+            height: 12px;
+            border-radius: 50%;
+            margin-left: 10px;
+        }
+        .status-active { background: #28a745; }
+        .status-inactive { background: #dc3545; }
+        
+        .tabs { 
+            display: flex; 
+            margin-bottom: 0; 
+            background: white;
+            border-radius: 15px 15px 0 0;
+            box-shadow: 0 4px 20px rgba(0,0,0,0.08);
+            overflow: hidden;
+        }
+        .tab { 
+            padding: 18px 25px; 
+            background: #f8f9fa; 
+            border: none; 
+            cursor: pointer; 
+            font-weight: 600;
+            font-size: 15px;
+            transition: all 0.3s ease;
+            flex: 1;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 8px;
+        }
+        .tab:hover { background: #e9ecef; }
+        .tab.active { 
+            background: #25D366; 
+            color: white; 
+        }
+        .tab-content { 
+            background: white; 
+            padding: 30px; 
+            border-radius: 0 0 15px 15px; 
+            box-shadow: 0 4px 20px rgba(0,0,0,0.08);
+            min-height: 500px;
+        }
+        
+        .event { 
+            border: 1px solid #e9ecef; 
+            margin: 15px 0; 
+            padding: 20px; 
+            border-radius: 12px; 
+            background: #fafbfc; 
+            transition: all 0.3s ease;
+        }
+        .event:hover { 
+            box-shadow: 0 4px 15px rgba(0,0,0,0.1); 
+            transform: translateY(-2px);
+        }
+        .event-header { 
+            font-weight: 600; 
+            color: #333; 
+            display: flex; 
+            justify-content: space-between; 
+            align-items: center; 
+            margin-bottom: 15px;
+        }
+        .event-type { 
+            background: #25D366; 
+            color: white; 
+            padding: 6px 12px; 
+            border-radius: 20px; 
+            font-size: 12px; 
+            font-weight: 600;
+            text-transform: uppercase;
+        }
+        .event-data { 
+            background: #f8f9fa; 
+            padding: 20px; 
+            border-radius: 8px; 
+            border-left: 4px solid #25D366;
+        }
+        pre { 
+            white-space: pre-wrap; 
+            word-wrap: break-word; 
+            margin: 0; 
+            font-family: 'Consolas', 'Monaco', monospace;
+            font-size: 13px;
+            line-height: 1.5;
+        }
+        
+        .empty-state {
+            text-align: center;
+            padding: 60px 20px;
+            color: #666;
+        }
+        .empty-state-icon {
+            font-size: 4em;
+            margin-bottom: 20px;
+            opacity: 0.5;
+        }
+        .empty-state-text {
+            font-size: 1.2em;
+            margin-bottom: 10px;
+        }
+        .empty-state-subtext {
+            opacity: 0.7;
+        }
+        
+        .loading {
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            padding: 40px;
+        }
+        .spinner {
+            width: 40px;
+            height: 40px;
+            border: 4px solid #f3f3f3;
+            border-top: 4px solid #25D366;
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+        }
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+        
+        .poll-votes {
+            margin-top: 15px;
+            padding: 15px;
+            background: #e8f5e8;
+            border-radius: 8px;
+        }
+        .vote-item {
+            margin: 8px 0;
+            padding: 8px 12px;
+            background: white;
+            border-radius: 6px;
+            font-size: 14px;
+        }
+        
+        .call-status {
+            display: inline-block;
+            padding: 4px 8px;
+            border-radius: 12px;
+            font-size: 11px;
+            font-weight: 600;
+            text-transform: uppercase;
+        }
+        .call-incoming { background: #fff3cd; color: #856404; }
+        .call-ended { background: #f8d7da; color: #721c24; }
+        .call-rejected { background: #d1ecf1; color: #0c5460; }
+        
+        @media (max-width: 768px) {
+            .container { padding: 10px; }
+            .header { padding: 20px; }
+            .header h1 { font-size: 2em; }
+            .stats-grid { grid-template-columns: 1fr; }
+            .tabs { flex-direction: column; }
+            .tab { padding: 15px; }
+            .controls { flex-direction: column; align-items: stretch; }
+            button { justify-content: center; }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>🚀 Enhanced WhatsApp Dashboard</h1>
+            <p>Real-time monitoring with advanced features</p>
+        </div>
+        
+        <div class="stats-grid" id="stats-grid">
+            <!-- Stats will be loaded here -->
+        </div>
+
+        <div class="controls">
+            <button class="refresh" onclick="refreshData()">
+                🔄 Refresh Now
+            </button>
+            <button class="auto-refresh" id="auto-refresh-btn" onclick="toggleAutoRefresh()">
+                ⏱️ Auto Refresh: OFF
+            </button>
+            <button class="clear" onclick="clearEvents()">
+                🗑️ Clear Events
+            </button>
+            <button class="filter" onclick="filterEvents('location_message')">
+                📍 Location Events
+            </button>
+            <button class="filter" onclick="filterEvents('incoming_call')">
+                📞 Call Events
+            </button>
+            <button class="filter" onclick="filterEvents('poll_created')">
+                📊 Poll Events
+            </button>
+            <span class="status-indicator" id="connection-status"></span>
+            <span id="connection-text">Connecting...</span>
+        </div>
+
+        <div class="tabs">
+            <button class="tab active" onclick="showTab('events')">
+                📋 Recent Events
+            </button>
+            <button class="tab" onclick="showTab('locations')">
+                📍 Locations
+            </button>
+            <button class="tab" onclick="showTab('calls')">
+                📞 Calls
+            </button>
+            <button class="tab" onclick="showTab('polls')">
+                📊 Polls
+            </button>
+        </div>
+
+        <div id="events" class="tab-content">
+            <h3>Recent Events</h3>
+            <div id="events-list">
+                <div class="loading">
+                    <div class="spinner"></div>
+                </div>
+            </div>
+        </div>
+
+        <div id="locations" class="tab-content" style="display: none;">
+            <h3>Location Tracking</h3>
+            <div id="locations-list">
+                <div class="loading">
+                    <div class="spinner"></div>
+                </div>
+            </div>
+        </div>
+
+        <div id="calls" class="tab-content" style="display: none;">
+            <h3>Call Management</h3>
+            <div id="calls-list">
+                <div class="loading">
+                    <div class="spinner"></div>
+                </div>
+            </div>
+        </div>
+
+        <div id="polls" class="tab-content" style="display: none;">
+            <h3>Poll Tracking</h3>
+            <div id="polls-list">
+                <div class="loading">
+                    <div class="spinner"></div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        let autoRefreshInterval = null;
+        let isAutoRefreshEnabled = false;
+        let isRefreshing = false;
+        
+        // Initialize dashboard
+        document.addEventListener('DOMContentLoaded', function() {
+            refreshData();
+            updateConnectionStatus(true);
+        });
+        
+        function sanitizeHtml(str) {
+            const div = document.createElement('div');
+            div.textContent = str;
+            return div.innerHTML;
+        }
+        
+        async function refreshData() {
+            if (isRefreshing) {
+                console.log('Refresh already in progress, skipping...');
+                return;
+            }
+            
+            isRefreshing = true;
+            try {
+                await Promise.all([
+                    loadStats(),
+                    loadEvents(),
+                    loadLocations(),
+                    loadCalls(),
+                    loadPolls()
+                ]);
+                updateConnectionStatus(true);
+            } catch (error) {
+                console.error('Error refreshing data:', error);
+                updateConnectionStatus(false);
+            } finally {
+                isRefreshing = false;
+            }
+        }
+        
+        async function loadStats() {
+            const statsGrid = document.getElementById('stats-grid');
+            statsGrid.innerHTML = '<div class="loading"><div class="spinner"></div></div>';
+            
+            try {
+                const response = await fetch('/stats');
+                if (!response.ok) throw new Error(`HTTP ${response.status}`);
+                const data = await response.json();
+                
+                statsGrid.innerHTML = `
+                    <div class="stat-card">
+                        <div class="stat-number">${data.totalEvents || 0}</div>
+                        <div class="stat-label">Total Events</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-number">${data.liveLocationTrackers || 0}</div>
+                        <div class="stat-label">Live Locations</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-number">${data.activeCalls || 0}</div>
+                        <div class="stat-label">Active Calls</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-number">${data.activePolls || 0}</div>
+                        <div class="stat-label">Active Polls</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-number">${data.browserTabs || 0}</div>
+                        <div class="stat-label">Browser Tabs</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-number">${Math.floor(data.uptime || 0)}</div>
+                        <div class="stat-label">Uptime (seconds)</div>
+                    </div>
+                `;
+            } catch (error) {
+                console.error('Error loading stats:', error);
+                statsGrid.innerHTML = `
+                    <div class="empty-state">
+                        <div class="empty-state-icon">⚠️</div>
+                        <div class="empty-state-text">Failed to load statistics</div>
+                        <div class="empty-state-subtext">${error.message}</div>
+                    </div>
+                `;
+            }
+        }
+        
+        async function loadEvents() {
+            const eventsList = document.getElementById('events-list');
+            eventsList.innerHTML = '<div class="loading"><div class="spinner"></div></div>';
+            
+            try {
+                const response = await fetch('/events?limit=20');
+                if (!response.ok) throw new Error(`HTTP ${response.status}`);
+                const data = await response.json();
+                
+                if (data.events && data.events.length > 0) {
+                    eventsList.innerHTML = '';
+                    data.events.reverse().forEach(event => {
+                        const eventDiv = document.createElement('div');
+                        eventDiv.className = 'event';
+                        
+                        const header = document.createElement('div');
+                        header.className = 'event-header';
+                        header.innerHTML = `<span>${new Date(event.timestamp).toLocaleString()}</span>`;
+                        
+                        const eventType = document.createElement('span');
+                        eventType.className = 'event-type';
+                        eventType.textContent = event.event || '';
+                        header.appendChild(eventType);
+                        
+                        const dataDiv = document.createElement('div');
+                        dataDiv.className = 'event-data';
+                        const pre = document.createElement('pre');
+                        pre.textContent = JSON.stringify(event.data, null, 2);
+                        dataDiv.appendChild(pre);
+                        
+                        eventDiv.appendChild(header);
+                        eventDiv.appendChild(dataDiv);
+                        eventsList.appendChild(eventDiv);
+                    });
+                } else {
+                    eventsList.innerHTML = `
+                        <div class="empty-state">
+                            <div class="empty-state-icon">📋</div>
+                            <div class="empty-state-text">No events yet</div>
+                            <div class="empty-state-subtext">Events will appear here as they are received</div>
+                        </div>
+                    `;
+                }
+            } catch (error) {
+                console.error('Error loading events:', error);
+                eventsList.innerHTML = `
+                    <div class="empty-state">
+                        <div class="empty-state-icon">⚠️</div>
+                        <div class="empty-state-text">Failed to load events</div>
+                        <div class="empty-state-subtext">${error.message}</div>
+                    </div>
+                `;
+            }
+        }
+        
+        async function loadLocations() {
+            const locationsList = document.getElementById('locations-list');
+            locationsList.innerHTML = '<div class="loading"><div class="spinner"></div></div>';
+            
+            try {
+                const response = await fetch('/live-locations');
+                if (!response.ok) throw new Error(`HTTP ${response.status}`);
+                const data = await response.json();
+                
+                if (data.trackers && data.trackers.length > 0) {
+                    locationsList.innerHTML = data.trackers.map(tracker => `
+                        <div class="event">
+                            <div class="event-header">
+                                <span>Tracker: ${sanitizeHtml(tracker.trackerId || '')}</span>
+                                <span class="event-type">ACTIVE</span>
+                            </div>
+                            <div class="event-data">
+                                <pre>${sanitizeHtml(JSON.stringify(tracker, null, 2))}</pre>
+                            </div>
+                        </div>
+                    `).join('');
+                } else {
+                    locationsList.innerHTML = `
+                        <div class="empty-state">
+                            <div class="empty-state-icon">📍</div>
+                            <div class="empty-state-text">No active location trackers</div>
+                            <div class="empty-state-subtext">Live location sharing will appear here</div>
+                        </div>
+                    `;
+                }
+            } catch (error) {
+                console.error('Error loading locations:', error);
+                locationsList.innerHTML = `
+                    <div class="empty-state">
+                        <div class="empty-state-icon">⚠️</div>
+                        <div class="empty-state-text">Failed to load locations</div>
+                        <div class="empty-state-subtext">${error.message}</div>
+                    </div>
+                `;
+            }
+        }
+        
+        async function loadCalls() {
+            const callsList = document.getElementById('calls-list');
+            callsList.innerHTML = '<div class="loading"><div class="spinner"></div></div>';
+            
+            try {
+                const response = await fetch('/calls');
+                if (!response.ok) throw new Error(`HTTP ${response.status}`);
+                const data = await response.json();
+                
+                if (data.calls && data.calls.length > 0) {
+                    callsList.innerHTML = data.calls.map(call => `
+                        <div class="event">
+                            <div class="event-header">
+                                <span>Call: ${sanitizeHtml(call.id || '')}</span>
+                                <span class="call-status call-${call.status}">${sanitizeHtml(call.status || '')}</span>
+                            </div>
+                            <div class="event-data">
+                                <strong>From:</strong> ${sanitizeHtml(call.from || '')}<br>
+                                <strong>Type:</strong> ${call.isVideo ? 'Video' : 'Voice'} ${call.isGroup ? '(Group)' : ''}<br>
+                                <strong>Time:</strong> ${new Date(call.timestamp).toLocaleString()}<br>
+                                ${call.endTime ? `<strong>Ended:</strong> ${new Date(call.endTime).toLocaleString()}<br>` : ''}
+                                ${call.reason ? `<strong>Reason:</strong> ${sanitizeHtml(call.reason)}<br>` : ''}
+                            </div>
+                        </div>
+                    `).join('');
+                } else {
+                    callsList.innerHTML = `
+                        <div class="empty-state">
+                            <div class="empty-state-icon">📞</div>
+                            <div class="empty-state-text">No active calls</div>
+                            <div class="empty-state-subtext">Incoming and outgoing calls will appear here</div>
+                        </div>
+                    `;
+                }
+            } catch (error) {
+                console.error('Error loading calls:', error);
+                callsList.innerHTML = `
+                    <div class="empty-state">
+                        <div class="empty-state-icon">⚠️</div>
+                        <div class="empty-state-text">Failed to load calls</div>
+                        <div class="empty-state-subtext">${error.message}</div>
+                    </div>
+                `;
+            }
+        }
+        
+        async function loadPolls() {
+            const pollsList = document.getElementById('polls-list');
+            pollsList.innerHTML = '<div class="loading"><div class="spinner"></div></div>';
+            
+            try {
+                const response = await fetch('/polls');
+                if (!response.ok) throw new Error(`HTTP ${response.status}`);
+                const data = await response.json();
+                
+                if (data.polls && data.polls.length > 0) {
+                    pollsList.innerHTML = data.polls.map(poll => `
+                        <div class="event">
+                            <div class="event-header">
+                                <span>Poll: ${sanitizeHtml(poll.pollName || 'Unnamed')}</span>
+                                <span class="event-type">${poll.totalVotes || 0} VOTES</span>
+                            </div>
+                            <div class="event-data">
+                                <strong>Created by:</strong> ${sanitizeHtml(poll.from || '')}<br>
+                                <strong>Created:</strong> ${new Date(poll.timestamp * 1000).toLocaleString()}<br>
+                                <strong>Multiple answers:</strong> ${poll.allowMultipleAnswers ? 'Yes' : 'No'}<br>
+                                ${poll.lastVoteAt ? `<strong>Last vote:</strong> ${new Date(poll.lastVoteAt).toLocaleString()}<br>` : ''}
+                                
+                                ${poll.pollOptions ? `
+                                    <div style="margin-top: 15px;">
+                                        <strong>Options:</strong>
+                                        <ul style="margin: 10px 0; padding-left: 20px;">
+                                            ${poll.pollOptions.map((option, index) => `
+                                                <li>${sanitizeHtml(typeof option === 'string' ? option : option.name || `Option ${index + 1}`)}</li>
+                                            `).join('')}
+                                        </ul>
+                                    </div>
+                                ` : ''}
+                                
+                                ${poll.votes && poll.votes.size > 0 ? `
+                                    <div class="poll-votes">
+                                        <strong>Recent Votes:</strong>
+                                        ${Array.from(poll.votes.values()).slice(-5).map(vote => `
+                                            <div class="vote-item">
+                                                <strong>${sanitizeHtml(vote.voterId || '')}</strong> voted for options: ${vote.selectedOptions.map(opt => sanitizeHtml(opt)).join(', ')}
+                                            </div>
+                                        `).join('')}
+                                    </div>
+                                ` : ''}
+                            </div>
+                        </div>
+                    `).join('');
+                } else {
+                    pollsList.innerHTML = `
+                        <div class="empty-state">
+                            <div class="empty-state-icon">📊</div>
+                            <div class="empty-state-text">No active polls</div>
+                            <div class="empty-state-subtext">Created polls and votes will appear here</div>
+                        </div>
+                    `;
+                }
+            } catch (error) {
+                console.error('Error loading polls:', error);
+                pollsList.innerHTML = `
+                    <div class="empty-state">
+                        <div class="empty-state-icon">⚠️</div>
+                        <div class="empty-state-text">Failed to load polls</div>
+                        <div class="empty-state-subtext">${error.message}</div>
+                    </div>
+                `;
+            }
+        }
+        
+        function toggleAutoRefresh() {
+            const btn = document.getElementById('auto-refresh-btn');
+            
+            if (isAutoRefreshEnabled) {
+                clearInterval(autoRefreshInterval);
+                isAutoRefreshEnabled = false;
+                btn.textContent = '⏱️ Auto Refresh: OFF';
+                btn.classList.remove('active');
+            } else {
+                autoRefreshInterval = setInterval(refreshData, 10000); // Refresh every 10 seconds
+                isAutoRefreshEnabled = true;
+                btn.textContent = '⏱️ Auto Refresh: ON';
+                btn.classList.add('active');
+            }
+        }
+        
+        function updateConnectionStatus(connected) {
+            const indicator = document.getElementById('connection-status');
+            const text = document.getElementById('connection-text');
+            
+            if (connected) {
+                indicator.className = 'status-indicator status-active';
+                text.textContent = 'Connected';
+            } else {
+                indicator.className = 'status-indicator status-inactive';
+                text.textContent = 'Disconnected';
+            }
+        }
+        
+        function clearEvents() {
+            if (confirm('Are you sure you want to clear all events?')) {
+                fetch('/events', { method: 'DELETE' })
+                    .then(() => {
+                        refreshData();
+                        alert('Events cleared successfully!');
+                    })
+                    .catch(error => {
+                        console.error('Error clearing events:', error);
+                        alert('Error clearing events');
+                    });
+            }
+        }
+        
+        function filterEvents(eventType) {
+            window.open(`/events/${eventType}`, '_blank');
+        }
+        
+        function showTab(tabName) {
+            // Hide all tab contents
+            document.querySelectorAll('.tab-content').forEach(tab => {
+                tab.style.display = 'none';
+            });
+            
+            // Remove active class from all tabs
+            document.querySelectorAll('.tab').forEach(tab => {
+                tab.classList.remove('active');
+            });
+            
+            // Show selected tab content
+            document.getElementById(tabName).style.display = 'block';
+            
+            // Add active class to clicked tab
+            event.target.classList.add('active');
+            
+            // Refresh data for the selected tab
+            switch(tabName) {
+                case 'events':
+                    loadEvents();
+                    break;
+                case 'locations':
+                    loadLocations();
+                    break;
+                case 'calls':
+                    loadCalls();
+                    break;
+                case 'polls':
+                    loadPolls();
+                    break;
+            }
+        }
+        
+        // Handle page visibility change to pause/resume auto-refresh
+        document.addEventListener('visibilitychange', function() {
+            if (document.hidden && isAutoRefreshEnabled) {
+                clearInterval(autoRefreshInterval);
+            } else if (!document.hidden && isAutoRefreshEnabled) {
+                autoRefreshInterval = setInterval(refreshData, 10000);
+            }
+        });
+    </script>
+</body>
+</html>
