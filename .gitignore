@@ -85,7 +85,8 @@ tests/
 .qodo/
 docs/
 webhook_logs/
-.wwebjs_auth - Copy/
+.wwebjs_auth
 downloads/
 media_cache/
 studio/
+lib/.wwebjs_auth

@@ -1,4 +1,4 @@
-const { PQueue } = require('p-queue');
+const PQueue = require('p-queue').default;
 const { WEBHOOK_EVENTS } = require('../constants');
 
 /**

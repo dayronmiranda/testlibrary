@@ -13,8 +13,6 @@
       "--disable-infobars",
       "--disable-extensions",
       "--disable-plugins",
-      "--disable-images",
-      "--disable-javascript",
       "--disable-default-apps",
       "--disable-sync",
       "--disable-translate",
@@ -41,7 +39,7 @@
   },
   "webhook": {
     "enabled": true,
-    "url": "http://localhostwebhook",
+    "url": "http://localhost:3001/webhook",
     "events": [
       "loading_screen",
       "qr",
@@ -148,7 +146,7 @@
     "disableWebSecurity": true,
     "hideWebDriver": true,
     "hideAutomationBanner": true,
-    "blockResources": ["stylesheet", "font", "image"],
+    "blockResources": ["font"],
     "emulateTimezone": "America/Chicago",
     "fingerprintEvasion": true
   },
@@ -181,14 +179,14 @@
   },
   "performance": {
     "qrMaxRetries": 5,
-    "authTimeoutMs": 60000,
+    "authTimeoutMs": 120000,
     "takeoverOnConflict": true,
     "takeoverTimeoutMs": 5000,
-    "puppeteerTimeout": 30000,
-    "pageLoadTimeout": 60000
+    "puppeteerTimeout": 60000,
+    "pageLoadTimeout": 120000
   },
   "features": {
-    "readOnlyMode": true,
+    "readOnlyMode": false,
     "enableQR": true,
     "enablePairing": false,
     "phoneNumber": null,

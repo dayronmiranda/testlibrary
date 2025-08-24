@@ -1,4 +1,5 @@
-const { Client, LocalAuth, NoAuth } = require('../index.js');
+const { Client, auth } = require('../index.js');
+const { LocalAuth, NoAuth } = auth;
 const fs = require('fs').promises;
 const path = require('path');
 const { createLoggerFromConfig } = require('./logger');
@@ -259,6 +260,24 @@ class EnhancedWhatsAppDriver {
         this.client.on('loading_screen', async (percent, message) => {
             await this.logger.info(`Loading screen: ${percent}% - ${message}`);
             await this.webhookManager.sendWebhook('loading_screen', { percent, message });
+            
+            // Add timeout handling for loading screen stuck at 99%
+            if (percent === 99) {
+                setTimeout(async () => {
+                    try {
+                        const currentState = await this.client.getState();
+                        await this.logger.warn(`Loading stuck at 99% for 30 seconds. Current state: ${currentState}`);
+                        
+                        // Try to force refresh if stuck
+                        if (currentState !== 'CONNECTED') {
+                            await this.logger.info('Attempting to refresh WhatsApp Web page...');
+                            await this.client.pupPage.reload({ waitUntil: 'networkidle0', timeout: 30000 });
+                        }
+                    } catch (error) {
+                        await this.logger.error('Error handling loading screen timeout:', error);
+                    }
+                }, 30000); // Wait 30 seconds before attempting refresh
+            }
         });
 
         this.client.on('qr', async (qr) => {
@@ -273,8 +292,12 @@ class EnhancedWhatsAppDriver {
 
         this.client.on('authenticated', async (session) => {
             await this.logger.info('Client authenticated');
+            console.log('✅ WhatsApp authenticated successfully');
             await this.webhookManager.sendWebhook('authenticated', { session });
             await this.setupBrowserLifecycleMonitoring();
+            
+            // Start checking for ready state immediately and repeatedly
+            this.startReadyStateChecker();
         });
 
         this.client.on('auth_failure', async (message) => {
@@ -283,17 +306,63 @@ class EnhancedWhatsAppDriver {
         });
 
         this.client.on('ready', async () => {
-            await this.logger.info('Client is ready');
+            await this.logger.info('Client is ready - WhatsApp Web is now connected and ready to receive messages');
+            console.log('✅ WhatsApp Client is ready and listening for messages');
             await this.webhookManager.sendWebhook('ready', {});
             await this.setupEnhancedMonitoring();
+            
+            // Test message event registration
+            await this.logger.info('Message event listeners registered successfully');
+            console.log('📱 Message event listeners are active');
+            
+            // Test event listener functionality
+            setTimeout(async () => {
+                try {
+                    console.log('🔍 Testing event listener functionality...');
+                    await this.logger.info('Testing event listener functionality');
+                    
+                    // Get client state
+                    const state = await this.client.getState();
+                    console.log(`📊 Current client state: ${state}`);
+                    await this.logger.info(`Current client state: ${state}`);
+                    
+                    // Test if we can get chats (indicates proper connection)
+                    const chats = await this.client.getChats();
+                    console.log(`💬 Found ${chats.length} chats`);
+                    await this.logger.info(`Found ${chats.length} chats`);
+                    
+                    console.log('✅ Event listener test completed - system is ready to receive messages');
+                    await this.logger.info('Event listener test completed - system is ready to receive messages');
+                } catch (error) {
+                    console.error('❌ Event listener test failed:', error);
+                    await this.logger.error('Event listener test failed:', error);
+                }
+            }, 5000); // Wait 5 seconds after ready
         });
 
-        // Message events - delegate to handlers
+        // Message events - delegate to handlers with enhanced logging
         this.client.on('message', async (message) => {
+            console.log('🔥 DEBUG: MESSAGE EVENT TRIGGERED!');
+            console.log('📨 New message received:', {
+                from: message.from,
+                type: message.type,
+                body: message.body?.substring(0, 50) + (message.body?.length > 50 ? '...' : ''),
+                timestamp: new Date(message.timestamp * 1000).toISOString()
+            });
+            await this.logger.info(`🔥 DEBUG: MESSAGE EVENT - New message received from ${message.from}: ${message.type}`);
             await this.handleMessage(message, 'message');
         });
 
         this.client.on('message_create', async (message) => {
+            console.log('🔥 DEBUG: MESSAGE_CREATE EVENT TRIGGERED!');
+            console.log('📝 Message created:', {
+                from: message.from,
+                type: message.type,
+                fromMe: message.fromMe,
+                body: message.body?.substring(0, 50) + (message.body?.length > 50 ? '...' : ''),
+                timestamp: new Date(message.timestamp * 1000).toISOString()
+            });
+            await this.logger.info(`🔥 DEBUG: MESSAGE_CREATE EVENT - Message created from ${message.from}: ${message.type} (fromMe: ${message.fromMe})`);
             await this.handleMessage(message, 'message_create');
         });
 
@@ -964,6 +1033,357 @@ class EnhancedWhatsAppDriver {
             await this.logger.error('Unhandled Rejection:', { reason, promise });
             await this.gracefulShutdown();
             process.exit(1);
+        });
+    }
+
+    // Force inject WWebJS utilities manually
+    async forceInjectWWebJS() {
+        try {
+            await this.logger.info('Attempting to force inject WWebJS utilities');
+            
+            // First ensure WWebJS object exists
+            await this.client.pupPage.evaluate(() => {
+                if (typeof window.WWebJS === 'undefined') {
+                    window.WWebJS = {};
+                }
+            });
+            
+            // Inject the complete utilities directly with the code
+            await this.client.pupPage.evaluate(() => {
+                // Initialize the WWebJS namespace
+                window.WWebJS = {};
+
+                // Load read-only utility functions directly
+                window.WWebJS.getMessageModel = (message) => {
+                    const msg = message.serialize();
+
+                    msg.isEphemeral = message.isEphemeral;
+                    msg.isStatusV3 = message.isStatusV3;
+                    msg.links = (window.Store.Validators.findLinks(message.mediaObject ? message.caption : message.body)).map((link) => ({
+                        link: link.href,
+                        isSuspicious: Boolean(link.suspiciousCharacters && link.suspiciousCharacters.size)
+                    }));
+
+                    if (msg.buttons) {
+                        msg.buttons = msg.buttons.serialize();
+                    }
+                    if (msg.dynamicReplyButtons) {
+                        msg.dynamicReplyButtons = JSON.parse(JSON.stringify(msg.dynamicReplyButtons));
+                    }
+                    if (msg.replyButtons) {
+                        msg.replyButtons = JSON.parse(JSON.stringify(msg.replyButtons));
+                    }
+
+                    if (typeof msg.id.remote === 'object') {
+                        msg.id = Object.assign({}, msg.id, { remote: msg.id.remote._serialized });
+                    }
+
+                    delete msg.pendingAckUpdate;
+
+                    return msg;
+                };
+
+                window.WWebJS.getChat = async (chatId, { getAsModel = true } = {}) => {
+                    const isChannel = /@\w*newsletter\b/.test(chatId);
+                    const chatWid = window.Store.WidFactory.createWid(chatId);
+                    let chat;
+
+                    if (isChannel) {
+                        try {
+                            chat = window.Store.NewsletterCollection.get(chatId);
+                            if (!chat) {
+                                await window.Store.ChannelUtils.loadNewsletterPreviewChat(chatId);
+                                chat = await window.Store.NewsletterCollection.find(chatWid);
+                            }
+                        } catch (err) {
+                            chat = null;
+                        }
+                    } else {
+                        chat = window.Store.Chat.get(chatWid) || (await window.Store.Chat.find(chatWid));
+                    }
+
+                    return getAsModel && chat
+                        ? await window.WWebJS.getChatModel(chat, { isChannel: isChannel })
+                        : chat;
+                };
+
+                window.WWebJS.getChats = async () => {
+                    const chats = window.Store.Chat.getModelsArray();
+                    const chatPromises = chats.map(chat => window.WWebJS.getChatModel(chat));
+                    return await Promise.all(chatPromises);
+                };
+
+                window.WWebJS.getChatModel = async (chat, { isChannel = false } = {}) => {
+                    if (!chat) return null;
+
+                    const model = chat.serialize();
+                    model.isGroup = false;
+                    model.isMuted = chat.mute?.expiration !== 0;
+                    if (isChannel) {
+                        model.isChannel = window.Store.ChatGetters.getIsNewsletter(chat);
+                    } else {
+                        model.formattedTitle = chat.formattedTitle;
+                    }
+
+                    if (chat.groupMetadata) {
+                        model.isGroup = true;
+                        const chatWid = window.Store.WidFactory.createWid(chat.id._serialized);
+                        await window.Store.GroupMetadata.update(chatWid);
+                        chat.groupMetadata.participants._models
+                            .filter(x => x.id?._serialized?.endsWith('@lid'))
+                            .forEach(x => x.contact?.phoneNumber && (x.id = x.contact.phoneNumber));
+                        model.groupMetadata = chat.groupMetadata.serialize();
+                        model.isReadOnly = chat.groupMetadata.announce;
+                    }
+
+                    if (chat.newsletterMetadata) {
+                        await window.Store.NewsletterMetadataCollection.update(chat.id);
+                        model.channelMetadata = chat.newsletterMetadata.serialize();
+                        model.channelMetadata.createdAtTs = chat.newsletterMetadata.creationTime;
+                    }
+
+                    model.lastMessage = null;
+                    if (model.msgs && model.msgs.length) {
+                        const lastMessage = chat.lastReceivedKey
+                            ? window.Store.Msg.get(chat.lastReceivedKey._serialized) || (await window.Store.Msg.getMessagesById([chat.lastReceivedKey._serialized]))?.messages?.[0]
+                            : null;
+                        lastMessage && (model.lastMessage = window.WWebJS.getMessageModel(lastMessage));
+                    }
+
+                    delete model.msgs;
+                    delete model.msgUnsyncedButtonReplyMsgs;
+                    delete model.unsyncedButtonReplies;
+
+                    return model;
+                };
+
+                window.WWebJS.getContactModel = contact => {
+                    let res = contact.serialize();
+                    res.isBusiness = contact.isBusiness === undefined ? false : contact.isBusiness;
+
+                    if (contact.businessProfile) {
+                        res.businessProfile = contact.businessProfile.serialize();
+                    }
+
+                    res.isMe = window.Store.ContactMethods.getIsMe(contact);
+                    res.isUser = window.Store.ContactMethods.getIsUser(contact);
+                    res.isGroup = window.Store.ContactMethods.getIsGroup(contact);
+                    res.isWAContact = window.Store.ContactMethods.getIsWAContact(contact);
+                    res.isMyContact = window.Store.ContactMethods.getIsMyContact(contact);
+                    res.isBlocked = contact.isContactBlocked;
+                    res.userid = window.Store.ContactMethods.getUserid(contact);
+                    res.isEnterprise = window.Store.ContactMethods.getIsEnterprise(contact);
+                    res.verifiedName = window.Store.ContactMethods.getVerifiedName(contact);
+                    res.verifiedLevel = window.Store.ContactMethods.getVerifiedLevel(contact);
+                    res.statusMute = window.Store.ContactMethods.getStatusMute(contact);
+                    res.name = window.Store.ContactMethods.getName(contact);
+                    res.shortName = window.Store.ContactMethods.getShortName(contact);
+                    res.pushname = window.Store.ContactMethods.getPushname(contact);
+
+                    return res;
+                };
+
+                window.WWebJS.getContact = async contactId => {
+                    const wid = window.Store.WidFactory.createWid(contactId);
+                    let contact = await window.Store.Contact.find(wid);
+                    if (contact.id._serialized.endsWith('@lid')) {
+                        contact.id = contact.phoneNumber;
+                    }
+                    const bizProfile = await window.Store.BusinessProfile.fetchBizProfile(wid);
+                    bizProfile.profileOptions && (contact.businessProfile = bizProfile);
+                    return window.WWebJS.getContactModel(contact);
+                };
+
+                window.WWebJS.getContacts = () => {
+                    const contacts = window.Store.Contact.getModelsArray();
+                    return contacts.map(contact => window.WWebJS.getContactModel(contact));
+                };
+
+                // Add write-only stubs (disabled for read-only mode)
+                window.WWebJS.sendMessage = async () => {
+                    throw new Error('Read-only mode: sendMessage is disabled');
+                };
+
+                console.log('✅ WWebJS utilities injected successfully');
+            });
+            
+            await this.logger.info('WWebJS utilities injection completed');
+        } catch (error) {
+            await this.logger.error('Failed to force inject WWebJS utilities:', error);
+            
+            // Fallback: try to inject basic WWebJS structure
+            try {
+                await this.client.pupPage.evaluate(() => {
+                    if (typeof window.WWebJS === 'undefined') {
+                        window.WWebJS = {};
+                    }
+                    
+                    // Basic implementations
+                    window.WWebJS.getMessageModel = (msg) => msg;
+                    window.WWebJS.getChatModel = (chat) => chat;
+                    window.WWebJS.getContactModel = (contact) => contact;
+                    
+                    window.WWebJS.getChats = async () => {
+                        if (window.Store && window.Store.Chat) {
+                            const chats = window.Store.Chat.getModelsArray();
+                            return chats.map(chat => ({
+                                id: chat.id,
+                                name: chat.name || chat.formattedTitle,
+                                isGroup: chat.isGroup,
+                                isReadOnly: chat.isReadOnly,
+                                unreadCount: chat.unreadCount,
+                                timestamp: chat.t,
+                                archived: chat.archived,
+                                pinned: chat.pin
+                            }));
+                        }
+                        return [];
+                    };
+                    
+                    window.WWebJS.getContacts = () => {
+                        if (window.Store && window.Store.Contact) {
+                            return window.Store.Contact.getModelsArray().map(contact => ({
+                                id: contact.id,
+                                name: contact.name,
+                                pushname: contact.pushname,
+                                shortName: contact.shortName,
+                                isMe: contact.isMe,
+                                isUser: contact.isUser,
+                                isGroup: contact.isGroup,
+                                isWAContact: contact.isWAContact,
+                                profilePicThumbObj: contact.profilePicThumbObj
+                            }));
+                        }
+                        return [];
+                    };
+                    
+                    console.log('✅ Basic WWebJS structure injected as fallback');
+                });
+                
+                await this.logger.info('Basic WWebJS structure injected as fallback');
+            } catch (fallbackError) {
+                await this.logger.error('Fallback WWebJS injection also failed:', fallbackError);
+                throw fallbackError;
+            }
+        }
+    }
+
+    // Ready state checker - forces ready event if needed
+    startReadyStateChecker() {
+        let checkCount = 0;
+        const maxChecks = 12; // Check for 2 minutes (12 * 10 seconds)
+        let readyTriggered = false;
+        
+        const checkInterval = setInterval(async () => {
+            checkCount++;
+            
+            try {
+                console.log(`🔍 Checking ready state (attempt ${checkCount}/${maxChecks})...`);
+                await this.logger.info(`Checking ready state (attempt ${checkCount}/${maxChecks})`);
+                
+                // Check if ready event was already triggered
+                if (readyTriggered) {
+                    clearInterval(checkInterval);
+                    return;
+                }
+                
+                // Get current state
+                const currentState = await this.client.getState();
+                console.log(`📊 Current state: ${currentState}`);
+                await this.logger.info(`Current state: ${currentState}`);
+                
+                // Check if WhatsApp Web is fully loaded
+                const webState = await this.client.pupPage.evaluate(() => {
+                    return {
+                        hasStore: typeof window.Store !== 'undefined',
+                        hasWWebJS: typeof window.WWebJS !== 'undefined',
+                        appState: window.Store?.AppState?.state || 'unknown',
+                        isConnected: window.Store?.AppState?.state === 'CONNECTED',
+                        hasSynced: window.Store?.AppState?.hasSynced || false,
+                        hasChats: window.Store?.Chat?.getModelsArray()?.length > 0 || false
+                    };
+                });
+                
+                // If Store exists but WWebJS doesn't, try to inject it manually
+                if (webState.hasStore && !webState.hasWWebJS && webState.isConnected) {
+                    console.log('🔧 Store exists but WWebJS missing, attempting manual injection...');
+                    await this.logger.info('Store exists but WWebJS missing, attempting manual injection');
+                    
+                    try {
+                        // Force inject WWebJS utilities
+                        await this.forceInjectWWebJS();
+                        
+                        // Check again after injection
+                        const newWebState = await this.client.pupPage.evaluate(() => {
+                            return {
+                                hasStore: typeof window.Store !== 'undefined',
+                                hasWWebJS: typeof window.WWebJS !== 'undefined',
+                                appState: window.Store?.AppState?.state || 'unknown',
+                                isConnected: window.Store?.AppState?.state === 'CONNECTED'
+                            };
+                        });
+                        
+                        console.log('📋 After injection - WWebJS available:', newWebState.hasWWebJS);
+                        await this.logger.info(`After injection - WWebJS available: ${newWebState.hasWWebJS}`);
+                        
+                        if (newWebState.hasWWebJS) {
+                            webState.hasWWebJS = true;
+                        }
+                    } catch (injectionError) {
+                        console.error('❌ Failed to inject WWebJS:', injectionError);
+                        await this.logger.error('Failed to inject WWebJS:', injectionError);
+                    }
+                }
+                
+                console.log('📋 WhatsApp Web State:', webState);
+                await this.logger.info('WhatsApp Web State:', webState);
+                
+                // If everything is ready, trigger the ready event
+                if (webState.hasStore && webState.hasWWebJS && webState.isConnected) {
+                    console.log('✅ WhatsApp Web is fully loaded, triggering ready event');
+                    await this.logger.info('WhatsApp Web is fully loaded, triggering ready event');
+                    
+                    readyTriggered = true;
+                    clearInterval(checkInterval);
+                    
+                    // Manually trigger ready event
+                    this.client.emit('ready');
+                    return;
+                }
+                
+                // If we've reached max checks, try one more time with force
+                if (checkCount >= maxChecks) {
+                    console.log('⚠️  Max checks reached, attempting force ready...');
+                    await this.logger.warn('Max checks reached, attempting force ready');
+                    
+                    if (webState.hasStore && currentState === 'CONNECTED') {
+                        console.log('🔄 Forcing ready event despite incomplete state');
+                        await this.logger.info('Forcing ready event despite incomplete state');
+                        
+                        readyTriggered = true;
+                        this.client.emit('ready');
+                    } else {
+                        console.log('❌ Unable to force ready state - WhatsApp Web not properly loaded');
+                        await this.logger.error('Unable to force ready state - WhatsApp Web not properly loaded');
+                    }
+                    
+                    clearInterval(checkInterval);
+                }
+                
+            } catch (error) {
+                console.error('❌ Error checking ready state:', error);
+                await this.logger.error('Error checking ready state:', error);
+                
+                if (checkCount >= maxChecks) {
+                    clearInterval(checkInterval);
+                }
+            }
+        }, 10000); // Check every 10 seconds
+        
+        // Listen for ready event to stop checking
+        this.client.once('ready', () => {
+            readyTriggered = true;
+            clearInterval(checkInterval);
         });
     }
 

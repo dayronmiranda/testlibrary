@@ -13,8 +13,8 @@ module.exports = {
         AuthStore: require('./lib/util/Injected/AuthStore/AuthStore')
     },
     factories: {
-        ChatFactory: require('./lib/factories/ChatFactory'),
-        ContactFactory: require('./lib/factories/ContactFactory'),
+        ChatFactory: require('./lib/structures').ChatFactory,
+        ContactFactory: require('./lib/structures').ContactFactory,
     },
     structures: require('./lib/structures'),
     util: {

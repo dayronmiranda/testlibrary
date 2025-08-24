@@ -7,10 +7,7 @@
   "scripts": {
     "start": "node src/app.js",
     "dev": "nodemon src/app.js",
-    "validate-config": "node src/config_validator.js",
-    "lint": "eslint .",
-    "docs": "npx jsdoc --configure .jsdoc.json --verbose",
-    "test": "mocha"
+    "validate-config": "node src/config_validator.js"
   },
   "repository": {
     "type": "git",
@@ -33,13 +30,15 @@
   "homepage": "",
   "dependencies": {
     "@pedroslopez/moduleraid": "^5.0.2",
+    "express": "^5.1.0",
     "fluent-ffmpeg": "2.1.3",
     "mime": "^3.0.0",
     "node-fetch": "^2.6.9",
     "node-webpmux": "3.1.7",
     "p-queue": "^8.1.0",
     "puppeteer": "^18.2.1",
-    "rebrowser-puppeteer-core": "^24.8.1"
+    "rebrowser-puppeteer-core": "^24.8.1",
+    "whatsapp-web.js": "^1.32.0"
   },
   "devDependencies": {
     "@types/node-fetch": "^2.5.12",

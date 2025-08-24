@@ -1,6 +1,6 @@
 const fs = require('fs').promises;
 const path = require('path');
-const { PATHS, AUTH_STRATEGIES, LOG_LEVELS, MEDIA_TYPES } = require('./app-constants');
+const { PATHS, AUTH_STRATEGIES, LOG_LEVELS, MEDIA_TYPES } = require('./constants');
 
 /**
  * Configuration Validator

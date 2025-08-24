@@ -1,7 +1,7 @@
 const fs = require('fs').promises;
 const path = require('path');
 const util = require('util');
-const { LOG_LEVELS, PATHS } = require('./app-constants');
+const { LOG_LEVELS, PATHS } = require('./constants');
 
 /**
  * Enhanced Logger with multiple transports and configurable levels

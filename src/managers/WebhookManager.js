@@ -2,6 +2,7 @@ const fs = require('fs').promises;
 const path = require('path');
 const fetch = require('node-fetch');
 const https = require('https');
+const http = require('http');
 
 /**
  * WebhookManager - Handles webhook queue, retries, and dead letter queue
@@ -23,8 +24,14 @@ class WebhookManager {
             deadLettered: 0
         };
         
-        // HTTP connection pooling
-        this.httpAgent = new https.Agent({
+        // HTTP/HTTPS connection pooling
+        this.httpsAgent = new https.Agent({
+            keepAlive: true,
+            maxSockets: 10,
+            timeout: 60000
+        });
+        
+        this.httpAgent = new http.Agent({
             keepAlive: true,
             maxSockets: 10,
             timeout: 60000
@@ -219,6 +226,10 @@ class WebhookManager {
         const timeout = setTimeout(() => controller.abort(), 10000);
         
         try {
+            // Determine which agent to use based on URL protocol
+            const url = new URL(this.config.webhook.url);
+            const agent = url.protocol === 'https:' ? this.httpsAgent : this.httpAgent;
+            
             const response = await fetch(this.config.webhook.url, {
                 method: 'POST',
                 headers: {
@@ -227,7 +238,7 @@ class WebhookManager {
                     'X-Webhook-ID': payload.id
                 },
                 body: JSON.stringify(payload),
-                agent: this.httpAgent,
+                agent: agent,
                 signal: controller.signal
             });
 
@@ -386,9 +397,12 @@ class WebhookManager {
             // Save dead letter queue
             await this.saveDeadLetterQueue();
             
-            // Destroy HTTP agent
+            // Destroy HTTP agents
             if (this.httpAgent) {
                 this.httpAgent.destroy();
+            }
+            if (this.httpsAgent) {
+                this.httpsAgent.destroy();
             }
             
             await this.logger.info('WebhookManager cleanup completed');
